@@ -85,7 +85,7 @@ from cookbook.helper.permission_helper import (CustomIsAdmin, CustomIsOwner, Cus
                                                get_household_user_ids)
 from cookbook.helper.recipe_search import RecipeSearch
 from cookbook.helper.recipe_url_import import clean_dict, get_from_youtube_scraper, get_images_from_soup
-from cookbook.helper.shopping_helper import RecipeShoppingEditor
+from cookbook.helper.shopping_helper import RecipeShoppingEditor, MealPlanShoppingSync
 from cookbook.models import (Automation, BookmarkletImport, ConnectorConfig, CookLog, CustomFilter, ExportLog, Food,
                              FoodInheritField, FoodProperty, ImportLog, Ingredient,
                              InviteLink, Keyword, MealPlan, MealType, Property, PropertyType, Recipe, RecipeBook,
@@ -121,7 +121,9 @@ from cookbook.serializer import (AccessTokenSerializer, AutomationSerializer, Au
                                  AiImportSerializer, ImportOpenDataSerializer, ImportOpenDataMetaDataSerializer, ImportOpenDataResponseSerializer, ExportRequestSerializer,
                                  RecipeImportSerializer, ConnectorConfigSerializer, SearchPreferenceSerializer, SearchFieldsSerializer, RecipeBatchUpdateSerializer,
                                  AiProviderSerializer, AiLogSerializer, FoodBatchUpdateSerializer, GenericModelReferenceSerializer, ShoppingListSerializer,
-                                 IngredientParserRequestSerializer, IngredientParserResponseSerializer, HouseholdSerializer, UserSpaceBatchUpdateSerializer
+                                 IngredientParserRequestSerializer, IngredientParserResponseSerializer, HouseholdSerializer, UserSpaceBatchUpdateSerializer,
+                                 MealPlanShoppingSyncPreviewRequestSerializer, MealPlanShoppingSyncApplyRequestSerializer,
+                                 ShoppingSyncPreviewSerializer, ShoppingSyncApplyResultSerializer
                                  )
 from cookbook.version_info import TANDOOR_VERSION
 from cookbook.views.import_export import get_integration
@@ -1607,6 +1609,72 @@ class AutoPlanViewSet(LoggingMixin, mixins.CreateModelMixin, viewsets.GenericVie
             return Response(serializer.data)
 
         return Response(serializer.errors, 400)
+
+
+class MealPlanShoppingSyncViewSet(LoggingMixin, viewsets.GenericViewSet):
+    """
+    API endpoint for incrementally syncing meal plans to shopping list.
+    Provides preview and apply actions with proper permission checks.
+    """
+    permission_classes = [(CustomIsOwner | CustomIsHousehold | CustomIsUser) & CustomTokenHasReadWriteScope]
+    required_scopes = ['mealplan', 'shopping']
+
+    @extend_schema(
+        request=MealPlanShoppingSyncPreviewRequestSerializer,
+        responses={200: ShoppingSyncPreviewSerializer},
+        description=_('Preview changes that would be made when syncing meal plans to shopping list')
+    )
+    @decorators.action(detail=False, methods=['POST'], serializer_class=MealPlanShoppingSyncPreviewRequestSerializer)
+    def preview(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        sync = MealPlanShoppingSync(
+            user=request.user,
+            space=request.space,
+            from_date=serializer.validated_data['from_date'],
+            to_date=serializer.validated_data['to_date'],
+            exclude_onhand=serializer.validated_data.get('exclude_onhand', False),
+            include_related=serializer.validated_data.get('include_related', None)
+        )
+
+        has_permission, error_msg = sync.check_permissions()
+        if not has_permission:
+            raise PermissionDenied(detail=error_msg, code=403)
+
+        preview = sync.calculate_changes()
+        return Response(preview.to_dict(), status=status.HTTP_200_OK)
+
+    @extend_schema(
+        request=MealPlanShoppingSyncApplyRequestSerializer,
+        responses={200: ShoppingSyncApplyResultSerializer},
+        description=_('Apply synced changes from meal plans to shopping list')
+    )
+    @decorators.action(detail=False, methods=['POST'], serializer_class=MealPlanShoppingSyncApplyRequestSerializer)
+    def apply(self, request):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        sync = MealPlanShoppingSync(
+            user=request.user,
+            space=request.space,
+            from_date=serializer.validated_data['from_date'],
+            to_date=serializer.validated_data['to_date'],
+            exclude_onhand=serializer.validated_data.get('exclude_onhand', False),
+            include_related=serializer.validated_data.get('include_related', None)
+        )
+
+        has_permission, error_msg = sync.check_permissions()
+        if not has_permission:
+            raise PermissionDenied(detail=error_msg, code=403)
+
+        preview = sync.calculate_changes()
+        selected_changes = serializer.validated_data.get('selected_changes', None)
+
+        results = sync.apply_changes(preview, selected_changes=selected_changes)
+        return Response(results, status=status.HTTP_200_OK)
 
 
 class MealTypeViewSet(LoggingMixin, viewsets.ModelViewSet, DeleteRelationMixing):

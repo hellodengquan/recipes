@@ -2234,3 +2234,52 @@ class IngredientParserRequestSerializer(serializers.Serializer):
 class IngredientParserResponseSerializer(serializers.Serializer):
     ingredient = IngredientSimpleSerializer(many=False, allow_null=True)
     ingredients = IngredientSimpleSerializer(many=True)
+
+
+class MealPlanShoppingSyncPreviewRequestSerializer(serializers.Serializer):
+    from_date = serializers.DateField(help_text=_('Start date for meal plan range'))
+    to_date = serializers.DateField(help_text=_('End date for meal plan range'))
+    exclude_onhand = serializers.BooleanField(required=False, default=False,
+                                              help_text=_('Exclude ingredients that are marked as on hand'))
+    include_related = serializers.BooleanField(required=False, default=None,
+                                               help_text=_('Include related recipes ingredients. Uses user preference if not provided.'))
+
+
+class MealPlanShoppingSyncApplyRequestSerializer(MealPlanShoppingSyncPreviewRequestSerializer):
+    selected_changes = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        help_text=_('Indices of changes to apply. If not provided, all changes will be applied.')
+    )
+
+
+class ShoppingSyncIngredientSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    food_name = serializers.CharField()
+    amount = serializers.FloatField()
+    unit_name = serializers.CharField(allow_null=True)
+
+
+class ShoppingSyncChangeSerializer(serializers.Serializer):
+    change_type = serializers.ChoiceField(choices=['add', 'merge', 'remove'])
+    mealplan_id = serializers.IntegerField(allow_null=True)
+    mealplan_label = serializers.CharField(allow_null=True)
+    recipe_id = serializers.IntegerField(allow_null=True)
+    recipe_name = serializers.CharField(allow_null=True)
+    servings = serializers.FloatField(allow_null=True)
+    ingredients = ShoppingSyncIngredientSerializer(many=True)
+    shopping_list_recipe_id = serializers.IntegerField(allow_null=True)
+    merged_from_ids = serializers.ListField(child=serializers.IntegerField())
+
+
+class ShoppingSyncPreviewSerializer(serializers.Serializer):
+    changes = ShoppingSyncChangeSerializer(many=True)
+    summary = serializers.DictField(child=serializers.IntegerField())
+
+
+class ShoppingSyncApplyResultSerializer(serializers.Serializer):
+    added = serializers.IntegerField()
+    merged = serializers.IntegerField()
+    removed = serializers.IntegerField()
+    failed = serializers.IntegerField()
+    errors = serializers.ListField(child=serializers.CharField())
