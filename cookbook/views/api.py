@@ -124,7 +124,7 @@ from cookbook.serializer import (AccessTokenSerializer, AutomationSerializer, Au
                                  IngredientParserRequestSerializer, IngredientParserResponseSerializer, HouseholdSerializer, UserSpaceBatchUpdateSerializer
                                  )
 from cookbook.version_info import TANDOOR_VERSION
-from cookbook.views.import_export import get_integration
+from cookbook.views.import_export import get_integration, launch_import, MSG_PROVIDER_NOT_IMPLEMENTED
 from recipes import settings
 from recipes.settings import DRF_THROTTLE_RECIPE_URL_IMPORT, FDC_API_KEY, AI_RATELIMIT
 
@@ -2952,25 +2952,10 @@ class AppImportView(APIView):
         form = ImportForm(request.POST, request.FILES)
         if form.is_valid() and request.FILES != {}:
             try:
-                integration = get_integration(request, form.cleaned_data['type'])
-
-                il = ImportLog.objects.create(type=form.cleaned_data['type'], created_by=request.user, space=request.space)
-                files = []
-                for f in request.FILES.getlist('files'):
-                    files.append({'file': io.BytesIO(f.read()), 'name': f.name})
-                t = threading.Thread(target=integration.do_import,
-                                     args=[files, il, form.cleaned_data['duplicates']],
-                                     kwargs={'meal_plans': form.cleaned_data['meal_plans'],
-                                             'shopping_lists': form.cleaned_data['shopping_lists'],
-                                             'nutrition_per_serving': form.cleaned_data['nutrition_per_serving']
-                                             }
-                                     )
-                t.setDaemon(True)
-                t.start()
-
-                return Response({'import_id': il.pk}, status=status.HTTP_200_OK)
+                ok, payload = launch_import(request, form)
+                return Response(payload, status=status.HTTP_200_OK)
             except NotImplementedError:
-                return Response({'error': True, 'msg': _('Importing is not implemented for this provider')},
+                return Response({'error': True, 'msg': MSG_PROVIDER_NOT_IMPLEMENTED},
                                 status=status.HTTP_400_BAD_REQUEST)
         else:
             return Response({'error': True, 'msg': form.errors}, status=status.HTTP_400_BAD_REQUEST)
@@ -3121,19 +3106,10 @@ def import_files(request):
     form = ImportForm(request.POST, request.FILES)
     if form.is_valid() and request.FILES != {}:
         try:
-            integration = get_integration(request, form.cleaned_data['type'])
-
-            il = ImportLog.objects.create(type=form.cleaned_data['type'], created_by=request.user, space=request.space)
-            files = []
-            for f in request.FILES.getlist('files'):
-                files.append({'file': io.BytesIO(f.read()), 'name': f.name})
-            t = threading.Thread(target=integration.do_import, args=[files, il, form.cleaned_data['duplicates']])
-            t.setDaemon(True)
-            t.start()
-
-            return Response({'import_id': il.pk}, status=status.HTTP_200_OK)
+            ok, payload = launch_import(request, form)
+            return Response(payload, status=status.HTTP_200_OK)
         except NotImplementedError:
-            return Response({'error': True, 'msg': _('Importing is not implemented for this provider')},
+            return Response({'error': True, 'msg': MSG_PROVIDER_NOT_IMPLEMENTED},
                             status=status.HTTP_400_BAD_REQUEST)
     else:
         return Response({'error': True, 'msg': form.errors}, status=status.HTTP_400_BAD_REQUEST)

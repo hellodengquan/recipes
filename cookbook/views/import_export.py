@@ -1,5 +1,6 @@
-import re
+import io
 import threading
+from typing import Any, Optional, Tuple
 
 from django.core.cache import cache
 from django.http import HttpResponse, JsonResponse
@@ -34,62 +35,94 @@ from cookbook.integration.recipesage import RecipeSage
 from cookbook.integration.rezeptsuitede import Rezeptsuitede
 from cookbook.integration.rezkonv import RezKonv
 from cookbook.integration.saffron import Saffron
-from cookbook.models import ExportLog, Recipe
+from cookbook.models import ExportLog, ImportLog, Recipe
 from recipes import settings
 
 
+MSG_PROVIDER_NOT_IMPLEMENTED = _('Importing is not implemented for this provider')
+MSG_PDF_UNAVAILABLE = 'PDF export is no longer available. Use your browser\'s print function (Ctrl+P) to save recipes as PDF.'
+MSG_ABOVE_SPACE_LIMIT = _('File is above space limit')
+
+
+INTEGRATION_REGISTRY = {
+    ImportExportBase.DEFAULT: Default,
+    ImportExportBase.PAPRIKA: Paprika,
+    ImportExportBase.NEXTCLOUD: NextcloudCookbook,
+    ImportExportBase.MEALIE: Mealie,
+    ImportExportBase.MEALIE1: Mealie1,
+    ImportExportBase.CHOWDOWN: Chowdown,
+    ImportExportBase.SAFFRON: Saffron,
+    ImportExportBase.CHEFTAP: ChefTap,
+    ImportExportBase.PEPPERPLATE: Pepperplate,
+    ImportExportBase.DOMESTICA: Domestica,
+    ImportExportBase.RECIPEKEEPER: RecipeKeeper,
+    ImportExportBase.RECETTETEK: RecetteTek,
+    ImportExportBase.RECIPESAGE: RecipeSage,
+    ImportExportBase.REZKONV: RezKonv,
+    ImportExportBase.MEALMASTER: MealMaster,
+    ImportExportBase.OPENEATS: OpenEats,
+    ImportExportBase.PLANTOEAT: Plantoeat,
+    ImportExportBase.COOKBOOKAPP: CookBookApp,
+    ImportExportBase.COOKLANG: Cooklang,
+    ImportExportBase.COPYMETHAT: CopyMeThat,
+    ImportExportBase.MELARECIPES: MelaRecipes,
+    ImportExportBase.COOKMATE: Cookmate,
+    ImportExportBase.REZEPTSUITEDE: Rezeptsuitede,
+    ImportExportBase.GOURMET: Gourmet,
+}
+
+
 def get_integration(request, export_type):
-    if export_type == ImportExportBase.DEFAULT:
-        return Default(request, export_type)
-    if export_type == ImportExportBase.PAPRIKA:
-        return Paprika(request, export_type)
-    if export_type == ImportExportBase.NEXTCLOUD:
-        return NextcloudCookbook(request, export_type)
-    if export_type == ImportExportBase.MEALIE:
-        return Mealie(request, export_type)
-    if export_type == ImportExportBase.MEALIE1:
-        return Mealie1(request, export_type)
-    if export_type == ImportExportBase.CHOWDOWN:
-        return Chowdown(request, export_type)
-    if export_type == ImportExportBase.SAFFRON:
-        return Saffron(request, export_type)
-    if export_type == ImportExportBase.CHEFTAP:
-        return ChefTap(request, export_type)
-    if export_type == ImportExportBase.PEPPERPLATE:
-        return Pepperplate(request, export_type)
-    if export_type == ImportExportBase.DOMESTICA:
-        return Domestica(request, export_type)
-    if export_type == ImportExportBase.RECIPEKEEPER:
-        return RecipeKeeper(request, export_type)
-    if export_type == ImportExportBase.RECETTETEK:
-        return RecetteTek(request, export_type)
-    if export_type == ImportExportBase.RECIPESAGE:
-        return RecipeSage(request, export_type)
-    if export_type == ImportExportBase.REZKONV:
-        return RezKonv(request, export_type)
-    if export_type == ImportExportBase.MEALMASTER:
-        return MealMaster(request, export_type)
-    if export_type == ImportExportBase.OPENEATS:
-        return OpenEats(request, export_type)
-    if export_type == ImportExportBase.PLANTOEAT:
-        return Plantoeat(request, export_type)
-    if export_type == ImportExportBase.COOKBOOKAPP:
-        return CookBookApp(request, export_type)
-    if export_type == ImportExportBase.COOKLANG:
-        return Cooklang(request, export_type)
-    if export_type == ImportExportBase.COPYMETHAT:
-        return CopyMeThat(request, export_type)
     if export_type == ImportExportBase.PDF:
-    #     return PDFexport(request, export_type)  # pyppeteer dependency removed
-        raise NotImplementedError('PDF export is no longer available. Use your browser\'s print function (Ctrl+P) to save recipes as PDF.')
-    if export_type == ImportExportBase.MELARECIPES:
-        return MelaRecipes(request, export_type)
-    if export_type == ImportExportBase.COOKMATE:
-        return Cookmate(request, export_type)
-    if export_type == ImportExportBase.REZEPTSUITEDE:
-        return Rezeptsuitede(request, export_type)
-    if export_type == ImportExportBase.GOURMET:
-        return Gourmet(request, export_type)
+        raise NotImplementedError(MSG_PDF_UNAVAILABLE)
+    cls = INTEGRATION_REGISTRY.get(export_type)
+    if cls is None:
+        raise NotImplementedError(MSG_PROVIDER_NOT_IMPLEMENTED)
+    return cls(request, export_type)
+
+
+def prepare_import_files(file_list) -> list:
+    return [{'file': io.BytesIO(f.read()), 'name': f.name} for f in file_list]
+
+
+def start_import_thread(integration, files, il, import_duplicates: bool,
+                        meal_plans: bool = True, shopping_lists: bool = True,
+                        nutrition_per_serving: bool = False) -> threading.Thread:
+    kwargs = {}
+    if meal_plans or shopping_lists or nutrition_per_serving:
+        kwargs['meal_plans'] = meal_plans
+        kwargs['shopping_lists'] = shopping_lists
+        kwargs['nutrition_per_serving'] = nutrition_per_serving
+
+    t = threading.Thread(
+        target=integration.do_import,
+        args=[files, il, import_duplicates],
+        kwargs=kwargs,
+    )
+    t.setDaemon(True)
+    t.start()
+    return t
+
+
+def launch_import(request, form) -> Tuple[bool, dict]:
+    integration = get_integration(request, form.cleaned_data['type'])
+
+    il = ImportLog.objects.create(
+        type=form.cleaned_data['type'],
+        created_by=request.user,
+        space=request.space,
+    )
+    files = prepare_import_files(request.FILES.getlist('files'))
+    start_import_thread(
+        integration,
+        files,
+        il,
+        form.cleaned_data['duplicates'],
+        meal_plans=form.cleaned_data.get('meal_plans', True),
+        shopping_lists=form.cleaned_data.get('shopping_lists', True),
+        nutrition_per_serving=form.cleaned_data.get('nutrition_per_serving', False),
+    )
+    return True, {'import_id': il.pk}
 
 
 @group_required('user')
