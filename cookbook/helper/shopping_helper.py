@@ -300,13 +300,16 @@ class MealPlanShoppingSync:
             Q(created_by=self.user) | Q(created_by_id__in=self.household_user_ids)
         ).distinct().select_related('recipe', 'meal_type').prefetch_related('recipe__step_set__ingredients')
 
-    def _get_existing_shopping_recipes(self, meal_plan_ids):
+    def _get_all_shopping_recipes(self):
         return ShoppingListRecipe.objects.filter(
             space=self.space,
-            mealplan_id__in=meal_plan_ids
+            mealplan__isnull=False
         ).filter(
-            Q(entries__created_by=self.user) | Q(entries__created_by_id__in=self.household_user_ids)
-        ).distinct().prefetch_related('entries', 'entries__ingredient')
+            Q(entries__created_by=self.user)
+            | Q(entries__created_by_id__in=self.household_user_ids)
+            | Q(created_by=self.user)
+            | Q(created_by_id__in=self.household_user_ids)
+        ).distinct().prefetch_related('entries', 'entries__ingredient', 'mealplan')
 
     def _get_recipe_ingredients(self, recipe_id, exclude_onhand=False):
         if exclude_onhand:
@@ -318,18 +321,37 @@ class MealPlanShoppingSync:
             return Ingredient.objects.filter(step__recipe__id=recipe_id, food__ignore_shopping=False, space=self.space)
 
     def _get_all_ingredients_for_recipe(self, recipe):
-        ingredients = []
         exclude_onhand = self.exclude_onhand or self.user.userpreference.mealplan_autoexclude_onhand
 
         if self.include_related:
             related = recipe.get_related_recipes()
-            ingredients.extend(self._get_recipe_ingredients(recipe.id, exclude_onhand=exclude_onhand).exclude(food__recipe__in=related))
+            related_ids = [r.id for r in related]
+            main_qs = self._get_recipe_ingredients(recipe.id, exclude_onhand=exclude_onhand)
+            if related_ids:
+                main_qs = main_qs.exclude(food__recipe__in=related_ids)
+            ingredient_ids = set()
+            result = []
+            for ing in main_qs:
+                if ing.id and ing.id not in ingredient_ids:
+                    ingredient_ids.add(ing.id)
+                    result.append(ing)
             for r in related:
-                ingredients.extend(self._get_recipe_ingredients(r.id, exclude_onhand=exclude_onhand).exclude(food__recipe__in=related))
+                related_qs = self._get_recipe_ingredients(r.id, exclude_onhand=exclude_onhand)
+                if related_ids:
+                    related_qs = related_qs.exclude(food__recipe__in=related_ids)
+                for ing in related_qs:
+                    if ing.id and ing.id not in ingredient_ids:
+                        ingredient_ids.add(ing.id)
+                        result.append(ing)
+            return result
         else:
-            ingredients.extend(self._get_recipe_ingredients(recipe.id, exclude_onhand=exclude_onhand))
-
-        return ingredients
+            ingredient_ids = set()
+            result = []
+            for ing in self._get_recipe_ingredients(recipe.id, exclude_onhand=exclude_onhand):
+                if ing.id and ing.id not in ingredient_ids:
+                    ingredient_ids.add(ing.id)
+                    result.append(ing)
+            return result
 
     def _check_mealplan_permission(self, mealplan) -> bool:
         if is_object_owner(self.user, mealplan):
@@ -340,10 +362,37 @@ class MealPlanShoppingSync:
 
     def _check_slr_permission(self, slr) -> bool:
         first_entry = slr.entries.first()
-        if first_entry and is_object_owner(self.user, first_entry):
+        if first_entry:
+            if is_object_owner(self.user, first_entry):
+                return True
+            if is_object_household(self.user, first_entry):
+                return True
+        if is_object_owner(self.user, slr):
             return True
-        if first_entry and is_object_household(self.user, first_entry):
+        if slr.created_by_id in self.household_user_ids:
             return True
+        return False
+
+    def _get_existing_ingredient_ids(self, slr):
+        return set(
+            e.ingredient_id
+            for e in slr.entries.all()
+            if e.ingredient_id is not None
+        )
+
+    def _needs_merge(self, mp, existing_slr, ingredients):
+        if not existing_slr:
+            return False
+
+        existing_ingredient_ids = self._get_existing_ingredient_ids(existing_slr)
+        new_ingredient_ids = set(ing.id for ing in ingredients if ing.id)
+
+        if existing_ingredient_ids != new_ingredient_ids:
+            return True
+
+        if existing_slr.servings != mp.servings:
+            return True
+
         return False
 
     def calculate_changes(self) -> ShoppingSyncPreview:
@@ -351,14 +400,21 @@ class MealPlanShoppingSync:
 
         meal_plans = self._get_meal_plans()
         meal_plan_ids = list(meal_plans.values_list('id', flat=True))
-        existing_slrs = self._get_existing_shopping_recipes(meal_plan_ids)
-        existing_slr_map = {slr.mealplan_id: slr for slr in existing_slrs if slr.mealplan_id}
+        mp_id_set = set(meal_plan_ids)
+
+        all_slrs = self._get_all_shopping_recipes()
+        existing_slr_map = {}
+        for slr in all_slrs:
+            if slr.mealplan_id and slr.mealplan_id in mp_id_set:
+                if slr.mealplan_id not in existing_slr_map or slr.created_by_id == self.user.id:
+                    existing_slr_map[slr.mealplan_id] = slr
 
         food_to_slrs = {}
-        for slr in existing_slrs:
-            for entry in slr.entries.all():
-                if entry.food_id:
-                    food_to_slrs.setdefault(entry.food_id, []).append(slr)
+        for slr in all_slrs:
+            if slr.mealplan_id in mp_id_set:
+                for entry in slr.entries.all():
+                    if entry.food_id:
+                        food_to_slrs.setdefault(entry.food_id, []).append(slr)
 
         for mp in meal_plans:
             if not self._check_mealplan_permission(mp):
@@ -368,33 +424,24 @@ class MealPlanShoppingSync:
                 continue
 
             ingredients = self._get_all_ingredients_for_recipe(mp.recipe)
-
             existing_slr = existing_slr_map.get(mp.id)
 
-            if existing_slr:
-                existing_ingredient_ids = set(
-                    e.ingredient_id for e in existing_slr.entries.all() if e.ingredient_id
-                )
-                new_ingredient_ids = set(ing.id for ing in ingredients)
+            if existing_slr and self._check_slr_permission(existing_slr):
+                if self._needs_merge(mp, existing_slr, ingredients):
+                    existing_ingredient_ids = self._get_existing_ingredient_ids(existing_slr)
+                    new_ingredient_ids = set(ing.id for ing in ingredients if ing.id)
+                    added_ingredients = [ing for ing in ingredients if ing.id in (new_ingredient_ids - existing_ingredient_ids)]
 
-                if existing_ingredient_ids != new_ingredient_ids or existing_slr.servings != mp.servings:
-                    added_ingredients = [ing for ing in ingredients if ing.id not in existing_ingredient_ids]
-                    removed_ingredients = [
-                        e.ingredient for e in existing_slr.entries.all()
-                        if e.ingredient_id and e.ingredient_id not in new_ingredient_ids
-                    ]
-
-                    if added_ingredients or removed_ingredients or existing_slr.servings != mp.servings:
-                        preview.changes.append(ShoppingSyncChange(
-                            change_type=CHANGE_TYPE_MERGE,
-                            mealplan=mp,
-                            shopping_list_recipe=existing_slr,
-                            recipe=mp.recipe,
-                            servings=mp.servings,
-                            ingredients=[ing for ing in ingredients if ing.id not in existing_ingredient_ids],
-                            merged_from=[existing_slr]
-                        ))
-            else:
+                    preview.changes.append(ShoppingSyncChange(
+                        change_type=CHANGE_TYPE_MERGE,
+                        mealplan=mp,
+                        shopping_list_recipe=existing_slr,
+                        recipe=mp.recipe,
+                        servings=mp.servings,
+                        ingredients=added_ingredients,
+                        merged_from=[existing_slr]
+                    ))
+            elif not existing_slr:
                 merge_candidates = []
                 for ing in ingredients:
                     if ing.food_id in food_to_slrs:
@@ -412,8 +459,7 @@ class MealPlanShoppingSync:
                     merged_from=merge_candidates
                 ))
 
-        mp_id_set = set(meal_plan_ids)
-        for slr in existing_slrs:
+        for slr in all_slrs:
             if slr.mealplan_id and slr.mealplan_id not in mp_id_set:
                 if self._check_slr_permission(slr):
                     preview.changes.append(ShoppingSyncChange(
@@ -479,15 +525,16 @@ class MealPlanShoppingSync:
             mealplan=change.mealplan
         )
 
-        if change.mealplan and change.ingredients:
+        if change.mealplan and change.recipe:
             all_ingredients = self._get_all_ingredients_for_recipe(change.recipe)
-            ingredient_ids = [ing.id for ing in all_ingredients]
+            ingredient_ids = [ing.id for ing in all_ingredients if ing.id]
             editor.edit(
                 servings=change.servings,
-                ingredients=ingredient_ids
+                ingredients=ingredient_ids if ingredient_ids else None
             )
-        elif change.servings != change.shopping_list_recipe.servings:
-            editor.edit_servings(servings=change.servings)
+        else:
+            if change.servings is not None and change.servings != change.shopping_list_recipe.servings:
+                editor.edit_servings(servings=change.servings)
 
     def _apply_remove(self, change: ShoppingSyncChange):
         if not change.shopping_list_recipe:
