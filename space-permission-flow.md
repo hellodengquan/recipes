@@ -446,6 +446,294 @@ def invalidate_household_cache_on_delete(sender, instance=None, **kwargs):
 
 ---
 
+### 6.6 关键疑问一：缓存键无空间信息 → 跨空间越权？
+
+**疑问**：缓存键构成中不包含空间信息，当同一用户在不同空间拥有不同角色时，是否会导致跨空间越权？scope 隔离机制在这条路径上是否真正发挥作用？
+
+**缓存键构成** [permission_helper.py:51](cookbook/helper/permission_helper.py:51)：
+```python
+CACHE_KEY = hash((
+    inspect.stack()[0][3],               # 函数名 'has_group_permission'
+    (user.pk, user.username, user.email), # 用户标识（⚠️ 无 space 信息）
+    groups_allowed                        # 角色名元组
+))
+```
+
+**实际查询逻辑** [permission_helper.py:59-63](cookbook/helper/permission_helper.py:59)：
+```python
+if user_space := user.userspace_set.filter(active=True):
+    if len(user_space) != 1:
+        result = False
+    elif bool(user_space.first().groups.filter(name__in=groups_allowed)):
+        result = True
+```
+
+#### 6.6.1 代码证据链分析
+
+**证据 1：UserSpace 没有使用 ScopedManager**
+
+查看 UserSpace 模型定义 [models.py:577-594](cookbook/models.py:577)：
+```python
+class UserSpace(models.Model, PermissionModelMixin):
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    space = models.ForeignKey(Space, on_delete=models.CASCADE)
+    household = models.ForeignKey(Household, ...)
+    groups = models.ManyToManyField(Group)
+    active = models.BooleanField(default=False)
+    # ❌ 注意：这里没有定义 objects = ScopedManager(space='space')
+```
+
+对比业务模型 Recipe [models.py:1119](cookbook/models.py:1119)：
+```python
+objects = ScopedManager(space='space')  # ✅ 有 ScopedManager，自动受 scope 隔离
+```
+
+**结论**：`user.userspace_set.filter(active=True)` 查询 **不受 django-scopes 影响**，会从全局查找激活的 UserSpace。
+
+**证据 2：has_group_permission 执行位置与 scope 的关系**
+
+ScopeMiddleware 的执行顺序 [scope_middleware.py:55-80](cookbook/helper/scope_middleware.py:55)：
+```python
+# Step 1: 先在 scope 外获取激活的 UserSpace（因为 UserSpace 无 ScopedManager，这里本来就需要全局查）
+user_space = request.user.userspace_set.filter(active=True).first()
+...
+request.space = user_space.space
+request.user_space = user_space
+
+# Step 2: 进入 scope 上下文，后续所有业务代码在这里面执行
+with scope(space=request.space):
+    return self.get_response(request)
+```
+
+`has_group_permission()` 在 **Step 2 内部**被 DRF 权限类调用，但它查询的是 `user.userspace_set`（无 ScopedManager），因此 **scope 隔离对 userspace_set 查询不生效**。
+
+**Scope 隔离失效总结**：
+
+| 隔离层级 | 是否生效 | 原因 |
+|---------|---------|------|
+| Middleware `with scope(space=X)` | ❌ 不生效 | UserSpace 模型没有 ScopedManager |
+| Model Manager 层 | ❌ 不生效 | UserSpace 未定义 `ScopedManager(space='space')` |
+
+**scope 隔离机制在这条缓存路径上完全不发挥作用**。
+
+#### 6.6.2 攻击场景复现
+
+**前置条件**：
+- 用户 U 同时属于两个空间：
+  - SpaceA (id=1)：角色 admin
+  - SpaceB (id=2)：角色 guest
+- 攻击窗口：缓存 TTL 10 秒内
+
+| 时刻 | 操作 | 代码路径与执行结果 | 判定结果 |
+|------|------|-------------------|---------|
+| T0 | 在 SpaceA 请求需要 `admin` 权限的接口 | 1. `has_group_permission(U, ['admin'])` 缓存未命中<br>2. `user.userspace_set.filter(active=True)` → 返回 SpaceA_UserSpace<br>3. groups 包含 admin → result=True<br>4. 缓存写入 `KEY = hash(('has_group_permission', U标识, ('admin',))) → True` | ✅ 正确，有权限 |
+| T0.2s | 调用切换空间 API `/api/switch-active-space/2/` | `switch_user_active_space(U, SpaceB)` 执行：<br>1. `UserSpace.objects.filter(user=U).update(active=False)`<br>2. SpaceB_UserSpace.active = True, save()<br>3. ⚠️ **不清理 has_group_permission 缓存** | 切换成功，前端 reload |
+| T0.5s | 在 SpaceB 请求需要 `admin` 权限的接口 | 1. ScopeMiddleware 正确设置 `request.space = SpaceB`<br>2. 进入 `with scope(space=SpaceB)` 上下文<br>3. 调用 `has_group_permission(U, ['admin'])`<br>4. **缓存 KEY 完全相同**（用户+角色没变，无 space 因子）<br>5. **命中 T0 缓存，直接返回 True**<br>6. **实际查询根本没有执行**，SpaceB_UserSpace.groups=guest 没人看 | ⚠️ **越权成功** |
+
+#### 6.6.3 为什么「单一激活空间」也救不了？
+
+一个容易混淆的点：既然 `switch_user_active_space` 保证同一时刻只有一个激活空间，为什么还会出错？
+
+**答案：因为缓存优先级高于实际查询。**
+
+真正的执行顺序是：
+```
+has_group_permission(U, ['admin'])
+    ↓
+检查缓存 KEY = hash(用户, ('admin',))
+    ↓ 命中（KEY 相同）
+直接返回缓存值（SpaceA 时的 True）
+    ↓ ❌
+userspace_set 实际查询永远不会被触发
+```
+
+只要缓存键相同，缓存就会「短路」整个判定流程，不管当前激活的是哪个空间。
+
+#### 6.6.4 最终结论与修复建议
+
+**疑问一的结论：该漏洞成立。**
+
+当满足以下条件时，会发生跨空间越权：
+1. 同一用户在多个空间拥有不同角色
+2. 在 10 秒缓存窗口内执行了空间切换
+3. 切换后查询与切换前相同的权限组（例如切换前后都检查 admin）
+
+**根本原因**：
+1. **缓存键缺失 space_id**：用户、角色相同则键相同，空间变化无法反映
+2. **切换空间时不失效缓存**：`switch_user_active_space` 没有清理权限缓存
+3. **缓存查询优先级最高**：即使有 scope 隔离或单一激活空间的保障，缓存命中后实际查询不会执行
+
+**修复建议**：
+```python
+# 修复方案一：缓存键加入 active_space_id（推荐，最彻底）
+# 在 has_group_permission 中先获取激活空间，再参与 KEY 计算
+def has_group_permission(user, groups, no_cache=False):
+    if not user.is_authenticated:
+        return False
+    groups_allowed = get_allowed_groups(groups)
+    
+    # 先查激活空间（全局查询，本来就不受 scope 影响）
+    active_user_space = user.userspace_set.filter(active=True).first()
+    active_space_id = active_user_space.space_id if active_user_space else None
+    
+    # KEY 中包含 space_id，切换空间后 KEY 自然变化
+    CACHE_KEY = 'perm_' + hashlib.md5(
+        f"{user.pk}_{active_space_id}_{groups_allowed}".encode()
+    ).hexdigest()
+    ...
+
+# 修复方案二：切换空间时失效该用户的所有权限缓存
+# （需要方案一的字符串键前缀才能精确匹配删除）
+def switch_user_active_space(user, space):
+    ...  # 原有逻辑
+    cache.delete_pattern(f"perm_{user.pk}_*")
+```
+
+---
+
+### 6.7 关键疑问二：裸 hash() 作为缓存键的碰撞风险
+
+**疑问**：使用 Python 内置 `hash()` 函数（裸哈希值）作为缓存键，是否存在碰撞风险？不同用户/角色组合碰撞后是否返回错误的权限结果？
+
+#### 6.7.1 Python hash() 函数特性
+
+| 特性 | 说明 | 对本场景的影响 |
+|------|------|--------------|
+| **随机性** | Python 3.3+ 默认启用 hash 随机化，每次启动生成随机种子 | 重启进程后所有缓存键失效，多 worker 不共享 |
+| **算法** | 字符串用 SipHash-2-4；整数 hash(n)=n；元组做异或+移位组合 | 64 位输出空间，自然碰撞概率极低 |
+| **非加密** | 不抗碰撞，非单向 | 理论上可被攻击者构造碰撞（需获取种子） |
+| **输出类型** | 返回 int（可为负整数） | 与项目其他字符串键风格完全不同 |
+
+#### 6.7.2 三类碰撞场景分析
+
+**场景一：两个用户/角色组合的自然碰撞**
+
+计算公式（生日悖论）：
+- 返回值空间：约 2^64（1.8×10^19 种可能）
+- P(碰撞) ≈ n² / (2 × 2^64)
+- 当 n = 1,000,000 次缓存写入时：
+  - P ≈ 10^12 / (3.6×10^19) ≈ **2.7×10^-8**（约 3700 万次才会发生一次）
+
+**结论**：正常使用下几乎不会发生自然碰撞。
+
+---
+
+**场景二：与项目其他缓存项碰撞**
+
+全项目审计 `hash()` 使用情况：
+```
+# grep 结果
+cookbook/helper/permission_helper.py:51: CACHE_KEY = hash(...)
+```
+
+项目中**只有 `has_group_permission` 使用整数 hash 作为缓存键**。其他缓存全部使用可读字符串前缀：
+- `household_user_ids_{space_id}_{household_id}` → 字符串
+- `SPACE_{id}_BASE_UNITS` → 字符串
+- `recipe_share_{pk}_{uuid}` → 字符串
+
+**Django cache 的键前缀机制**（以 Redis 为例）：
+```
+最终存储键 = ":1:<CACHE_KEY>"
+  ↑     ↑
+版本号  用户的 hash() 整数
+```
+整数和字符串在 Redis 中作为键时不会因类型隐式转换发生碰撞（Redis 键本身就是二进制安全的）。
+
+**结论**：与其他缓存项碰撞的概率几乎为零。
+
+---
+
+**场景三：攻击者刻意构造碰撞（安全风险）**
+
+攻击者可控字段：
+- `username` — 注册时可自选
+- `email` — 注册时可自选
+- `groups_allowed` — 由权限类传入，但攻击者可以选择访问需要特定权限的接口
+
+攻击路径：
+```
+攻击者注册账号 username="..."（精心构造）
+    ↓
+正常访问需要 ['user'] 权限的接口
+    ↓
+hash(('has_group_permission', (attacker_pk, attacker_username, attacker_email), ('guest','user','admin')))
+    ↓  恰好等于
+hash(('has_group_permission', (admin_pk, admin_username, admin_email), ('guest','user','admin')))
+    ↓
+攻击者查询自己的权限 → 命中管理员的缓存 → 返回 True → 权限提升
+```
+
+**攻击难度评估**：
+| 前提条件 | 难度 |
+|---------|------|
+| 获取服务器的 hash 种子（每进程随机） | 高 |
+| 在同一进程中找到碰撞对 | 中（离线+在线结合） |
+| 碰撞同时双方都在同一 10 秒 TTL 窗口内产生缓存 | 中低 |
+| admin 恰好 10 秒内查询过相同权限 | 取决于使用频率 |
+
+**结论**：攻击可行但门槛较高，需要多条件同时满足。
+
+#### 6.7.3 比碰撞更实际的功能性问题
+
+碰撞是概率性的，但以下问题是**确定性的**：
+
+1. **多 worker 部署缓存完全不共享**：
+   ```
+   Worker 1（种子=α）：KEY = hash(用户, admin) = 12345  — 写入
+   Worker 2（种子=β）：KEY = hash(用户, admin) = 98765  — 读不到，重新查DB
+   ```
+   gunicorn/uwsgi 多 worker 下缓存命中率趋近于 0。
+
+2. **进程重启后全缓存失效**：
+   - 每次部署/重启都有大量孤儿缓存占用内存直到 TTL 过期
+   - 重启后瞬时所有权限请求穿透到 DB
+
+3. **负整数键的兼容性问题**：
+   - `hash()` 可能返回负数，如 `-28493728947239847`
+   - 部分缓存后端可能对负整数键的字符串表示有特殊处理
+
+#### 6.7.4 碰撞后果总结
+
+| 碰撞类型 | 发生概率 | 业务影响 |
+|---------|---------|---------|
+| 自然碰撞（两用户） | 极低（~10^-8） | 用户 A 权限 → 用户 B 权限，权限提/降 |
+| 与其他缓存项碰撞 | ~0 | 无实际风险 |
+| 攻击者构造碰撞 | 中低（需种子+TTL 窗口） | 权限提升至目标用户级别 |
+| **多 worker 不共享** | **100% 确定发生** | **缓存几乎无效，DB 压力大** |
+| **重启后缓存失效** | **每次重启** | **瞬时 DB 压力尖峰** |
+
+#### 6.7.5 疑问二结论与修复建议
+
+**疑问二的结论**：
+- **安全层面**：自然碰撞可忽略，攻击碰撞理论存在但门槛较高
+- **工程层面**：多 worker 不共享、重启失效等问题是**确定性存在的严重功能性缺陷**
+
+**修复建议**：
+```python
+# 推荐方案：使用 hashlib.md5 + 可读前缀（进程/重启稳定、多 worker 共享）
+import hashlib
+
+def has_group_permission(user, groups, no_cache=False):
+    if not user.is_authenticated:
+        return False
+    groups_allowed = get_allowed_groups(groups)
+    
+    # 稳定、跨进程、加入 space_id 顺便修复疑问一
+    active_us = user.userspace_set.filter(active=True).only('space_id').first()
+    space_factor = active_us.space_id if active_us else 0
+    
+    key_material = f"perm:{user.pk}:{space_factor}:{groups_allowed}"
+    CACHE_KEY = "perm_" + hashlib.md5(key_material.encode()).hexdigest()
+    
+    if not no_cache:
+        cached = cache.get(CACHE_KEY)
+        if cached is not None:
+            return cached
+    # ... 后续逻辑 ...
+```
+
+---
+
 ## 七、前端权限判断逻辑
 
 ### 7.1 前端权限数据来源 [UserPreferenceStore.ts]
