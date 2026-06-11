@@ -60,7 +60,7 @@ class ImportContext:
     nutrition_per_serving: bool = False
     errors: List[ImportError] = field(default_factory=list)
     ignored_recipes: List[str] = field(default_factory=list)
-    imported_count: int = 0
+    imported_recipes: int = 0
 
     def add_error(self, message: str, exception: Optional[Exception] = None, filename: Optional[str] = None) -> None:
         self.errors.append(ImportError(message=message, exception=exception, filename=filename))
