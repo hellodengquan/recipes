@@ -31,12 +31,18 @@ class AsyncCacheRefresher(metaclass=Singleton):
     _logger: logging.Logger
     _queue: queue.Queue
     _worker: threading.Thread
+    _lock_manager_lock: threading.Lock
+    _unit_locks: dict
+    _active_unit_tasks: dict
 
     def __init__(self):
         self._logger = logging.getLogger("recipes.cache_refresher")
         self._logger.debug("AsyncCacheRefresher initializing")
         queue_size = getattr(settings, 'CACHE_REFRESH_QUEUE_SIZE', 1000)
         self._queue = queue.Queue(maxsize=queue_size)
+        self._lock_manager_lock = threading.Lock()
+        self._unit_locks = {}
+        self._active_unit_tasks = {}
         self._worker = threading.Thread(target=self.worker, args=(0, self._queue,), daemon=True)
         self._worker.start()
 
@@ -47,6 +53,65 @@ class AsyncCacheRefresher(metaclass=Singleton):
     def stop(self):
         self._queue.put(None)
         self._worker.join(timeout=5)
+
+    def _get_unit_lock_key(self, space_id: int, unit_id: Optional[int]) -> Optional[tuple]:
+        if unit_id is None:
+            return None
+        return (space_id, unit_id)
+
+    def _acquire_unit_lock(self, space_id: int, unit_id: Optional[int]) -> bool:
+        key = self._get_unit_lock_key(space_id, unit_id)
+        if key is None:
+            return True
+        with self._lock_manager_lock:
+            if key not in self._unit_locks:
+                self._unit_locks[key] = threading.Lock()
+            lock = self._unit_locks[key]
+        acquired = lock.acquire(blocking=False)
+        if acquired:
+            with self._lock_manager_lock:
+                self._active_unit_tasks[key] = True
+        return acquired
+
+    def _release_unit_lock(self, space_id: int, unit_id: Optional[int]):
+        key = self._get_unit_lock_key(space_id, unit_id)
+        if key is None:
+            return
+        with self._lock_manager_lock:
+            if key in self._active_unit_tasks:
+                del self._active_unit_tasks[key]
+            if key in self._unit_locks:
+                lock = self._unit_locks[key]
+                try:
+                    lock.release()
+                except RuntimeError:
+                    pass
+
+    def _is_unit_locked(self, space_id: int, unit_id: Optional[int]) -> bool:
+        key = self._get_unit_lock_key(space_id, unit_id)
+        if key is None:
+            return False
+        with self._lock_manager_lock:
+            return key in self._active_unit_tasks
+
+    @staticmethod
+    def _find_conflicting_task(space_id: int, unit_id: Optional[int], exclude_task_id: int = None):
+        if unit_id is None:
+            return None
+        active_statuses = [
+            CacheRefreshStatus.PENDING.value,
+            CacheRefreshStatus.RUNNING.value,
+            CacheRefreshStatus.RETRYING.value,
+        ]
+        with scopes_disabled():
+            qs = CacheRefreshTask.objects.filter(
+                space_id=space_id,
+                source_unit_id=unit_id,
+                status__in=active_statuses,
+            )
+            if exclude_task_id is not None:
+                qs = qs.exclude(pk=exclude_task_id)
+            return qs.order_by('-created_at').first()
 
     def _add_work(self, work: RefreshWork):
         try:
@@ -63,6 +128,35 @@ class AsyncCacheRefresher(metaclass=Singleton):
             t = CacheRefreshTask.objects.get(pk=task.id)
             t.cache_patterns = cache_patterns
             t.save(update_fields=['cache_patterns'])
+
+    @staticmethod
+    def _get_unit_ids_for_task(task: CacheRefreshTask) -> list:
+        unit_ids = []
+        if task.source_unit_id:
+            unit_ids.append(task.source_unit_id)
+        if task.target_unit_id and task.target_unit_id != task.source_unit_id:
+            unit_ids.append(task.target_unit_id)
+        return unit_ids
+
+    @staticmethod
+    def _check_and_handle_conflict(task: CacheRefreshTask) -> Optional[CacheRefreshTask]:
+        unit_ids = AsyncCacheRefresher._get_unit_ids_for_task(task)
+        for unit_id in unit_ids:
+            existing = AsyncCacheRefresher._find_conflicting_task(
+                space_id=task.space_id,
+                unit_id=unit_id,
+                exclude_task_id=task.id,
+            )
+            if existing is not None:
+                with scopes_disabled():
+                    t = CacheRefreshTask.objects.get(pk=task.id)
+                    t.mark_skipped(
+                        message=f"Skipped due to conflicting task {existing.id} "
+                                f"({existing.task_type}, unit={unit_id})",
+                        merged_into_task=existing,
+                    )
+                return existing
+        return None
 
     @staticmethod
     def submit_unit_merge_refresh(space: Space, source_unit_id: int, target_unit_id: int,
@@ -84,6 +178,13 @@ class AsyncCacheRefresher(metaclass=Singleton):
                 space=space,
                 cache_patterns=cache_patterns,
             )
+
+        conflicting = AsyncCacheRefresher._check_and_handle_conflict(task)
+        if conflicting is not None:
+            logging.getLogger("recipes.cache_refresher").info(
+                f"Task {task.id} skipped due to conflict with {conflicting.id}"
+            )
+            return task
 
         work = RefreshWork(task=task, cache_patterns=cache_patterns)
 
@@ -114,6 +215,13 @@ class AsyncCacheRefresher(metaclass=Singleton):
                 cache_patterns=cache_patterns,
             )
 
+        conflicting = AsyncCacheRefresher._check_and_handle_conflict(task)
+        if conflicting is not None:
+            logging.getLogger("recipes.cache_refresher").info(
+                f"Task {task.id} skipped due to conflict with {conflicting.id}"
+            )
+            return task
+
         work = RefreshWork(task=task, cache_patterns=cache_patterns)
 
         if not AsyncCacheRefresher.is_initialized():
@@ -143,6 +251,13 @@ class AsyncCacheRefresher(metaclass=Singleton):
                 cache_patterns=cache_patterns,
             )
 
+        conflicting = AsyncCacheRefresher._check_and_handle_conflict(task)
+        if conflicting is not None:
+            logging.getLogger("recipes.cache_refresher").info(
+                f"Task {task.id} skipped due to conflict with {conflicting.id}"
+            )
+            return task
+
         work = RefreshWork(task=task, cache_patterns=cache_patterns)
 
         if not AsyncCacheRefresher.is_initialized():
@@ -169,6 +284,13 @@ class AsyncCacheRefresher(metaclass=Singleton):
 
             task.mark_retrying()
 
+        conflicting = AsyncCacheRefresher._check_and_handle_conflict(task)
+        if conflicting is not None:
+            logging.getLogger("recipes.cache_refresher").info(
+                f"Retry task {task_id} skipped due to conflict with {conflicting.id}"
+            )
+            return task
+
         cache_patterns = task.cache_patterns if task.cache_patterns else []
 
         work = RefreshWork(task=task, cache_patterns=cache_patterns)
@@ -183,6 +305,7 @@ class AsyncCacheRefresher(metaclass=Singleton):
     @staticmethod
     def worker(worker_id: int, worker_queue: queue.Queue):
         logger = logging.getLogger("recipes.cache_refresher.worker")
+        refresher = AsyncCacheRefresher()
 
         logger.info(f"started AsyncCacheRefresher worker {worker_id}")
 
@@ -197,8 +320,43 @@ class AsyncCacheRefresher(metaclass=Singleton):
 
             logger.debug(f"received cache refresh task {item.task.id} for space {item.task.space.id}")
 
+            space_id = item.task.space_id
+            task_unit_ids = AsyncCacheRefresher._get_unit_ids_for_task(item.task)
+
+            locks_acquired = []
+            skip_due_to_lock = False
+
+            for unit_id in task_unit_ids:
+                if refresher._acquire_unit_lock(space_id, unit_id):
+                    locks_acquired.append(unit_id)
+                else:
+                    skip_due_to_lock = True
+                    logger.warning(f"Task {item.task.id} cannot acquire lock for unit {unit_id}, re-queuing")
+                    break
+
+            if skip_due_to_lock:
+                for unit_id in locks_acquired:
+                    refresher._release_unit_lock(space_id, unit_id)
+                import time
+                time.sleep(0.1)
+                try:
+                    refresher._queue.put_nowait(item)
+                except queue.Full:
+                    with scopes_disabled():
+                        try:
+                            item.task.mark_failed("Queue full after lock conflict retry")
+                        except BaseException:
+                            pass
+                worker_queue.task_done()
+                continue
+
             try:
-                AsyncCacheRefresher.process_refresh_work(item, logger)
+                with scopes_disabled():
+                    current = CacheRefreshTask.objects.get(pk=item.task.id)
+                if current.status == CacheRefreshStatus.SKIPPED.value:
+                    logger.info(f"Task {item.task.id} already marked as SKIPPED, bypassing execution")
+                else:
+                    AsyncCacheRefresher.process_refresh_work(item, logger)
             except BaseException as e:
                 logger.exception(f"Error processing cache refresh task {item.task.id}")
                 with scopes_disabled():
@@ -212,6 +370,8 @@ class AsyncCacheRefresher(metaclass=Singleton):
                     except BaseException:
                         logger.exception(f"Failed to handle task {item.task.id} failure")
             finally:
+                for unit_id in task_unit_ids:
+                    refresher._release_unit_lock(space_id, unit_id)
                 worker_queue.task_done()
 
         logger.info(f"terminating AsyncCacheRefresher worker {worker_id}")
@@ -250,6 +410,10 @@ class AsyncCacheRefresher(metaclass=Singleton):
         try:
             with scopes_disabled():
                 task = CacheRefreshTask.objects.get(pk=work.task.id)
+
+            if task.status == CacheRefreshStatus.SKIPPED.value:
+                logger.info(f"Task {task.id} is SKIPPED, bypassing execution")
+                return
 
             cache_patterns = work.cache_patterns if work.cache_patterns else task.cache_patterns
             is_resuming = task.status == CacheRefreshStatus.RETRYING.value or task.last_processed_index > 0

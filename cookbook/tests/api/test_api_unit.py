@@ -1056,3 +1056,390 @@ def test_process_refresh_work_simulated_failure_then_resume(space_1):
 
         for key in test_cache_keys:
             assert caches['default'].get(key) is None
+
+
+def test_cache_refresh_task_mark_skipped(space_1):
+    with scopes_disabled():
+        task1 = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=100,
+            space=space_1,
+        )
+        task2 = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_MERGE.value,
+            source_unit_id=100,
+            target_unit_id=200,
+            space=space_1,
+        )
+
+        assert task2.status == CacheRefreshStatus.PENDING.value
+        assert task2.merged_into_task is None
+
+        task2.mark_skipped(message='Duplicate task skipped', merged_into_task=task1)
+        task2.refresh_from_db()
+
+        assert task2.status == CacheRefreshStatus.SKIPPED.value
+        assert task2.message == 'Duplicate task skipped'
+        assert task2.merged_into_task_id == task1.id
+        assert task2.completed_at is not None
+
+
+def test_find_conflicting_task_pending(space_1):
+    with scopes_disabled():
+        task1 = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=50,
+            status=CacheRefreshStatus.PENDING.value,
+            space=space_1,
+        )
+
+        conflicting = AsyncCacheRefresher._find_conflicting_task(
+            space_id=space_1.id,
+            unit_id=50,
+            exclude_task_id=None,
+        )
+        assert conflicting is not None
+        assert conflicting.id == task1.id
+
+
+def test_find_conflicting_task_exclude_self(space_1):
+    with scopes_disabled():
+        task1 = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=60,
+            status=CacheRefreshStatus.PENDING.value,
+            space=space_1,
+        )
+
+        conflicting = AsyncCacheRefresher._find_conflicting_task(
+            space_id=space_1.id,
+            unit_id=60,
+            exclude_task_id=task1.id,
+        )
+        assert conflicting is None
+
+
+def test_find_conflicting_task_completed_ignored(space_1):
+    with scopes_disabled():
+        CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=70,
+            status=CacheRefreshStatus.COMPLETED.value,
+            space=space_1,
+        )
+
+        conflicting = AsyncCacheRefresher._find_conflicting_task(
+            space_id=space_1.id,
+            unit_id=70,
+        )
+        assert conflicting is None
+
+
+def test_find_conflicting_task_failed_ignored(space_1):
+    with scopes_disabled():
+        CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=80,
+            status=CacheRefreshStatus.FAILED.value,
+            space=space_1,
+        )
+
+        conflicting = AsyncCacheRefresher._find_conflicting_task(
+            space_id=space_1.id,
+            unit_id=80,
+        )
+        assert conflicting is None
+
+
+def test_find_conflicting_task_different_space(space_1, space_2):
+    with scopes_disabled():
+        CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=90,
+            status=CacheRefreshStatus.PENDING.value,
+            space=space_1,
+        )
+
+        conflicting = AsyncCacheRefresher._find_conflicting_task(
+            space_id=space_2.id,
+            unit_id=90,
+        )
+        assert conflicting is None
+
+
+def test_submit_unit_save_conflict_skip(space_1):
+    with scopes_disabled():
+        existing = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=150,
+            status=CacheRefreshStatus.PENDING.value,
+            space=space_1,
+        )
+
+        new_task = AsyncCacheRefresher.submit_unit_save_refresh(
+            space=space_1,
+            unit_id=150,
+        )
+
+        new_task.refresh_from_db()
+        assert new_task.status == CacheRefreshStatus.SKIPPED.value
+        assert new_task.merged_into_task_id == existing.id
+        assert 'conflicting task' in new_task.message
+
+
+def test_submit_unit_merge_conflict_on_source_unit(space_1):
+    with scopes_disabled():
+        existing = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=300,
+            status=CacheRefreshStatus.RUNNING.value,
+            space=space_1,
+        )
+
+        merge_task = AsyncCacheRefresher.submit_unit_merge_refresh(
+            space=space_1,
+            source_unit_id=300,
+            target_unit_id=400,
+        )
+
+        merge_task.refresh_from_db()
+        assert merge_task.status == CacheRefreshStatus.SKIPPED.value
+        assert merge_task.merged_into_task_id == existing.id
+
+
+def test_submit_unit_merge_conflict_on_target_unit(space_1):
+    with scopes_disabled():
+        existing = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=500,
+            status=CacheRefreshStatus.RETRYING.value,
+            space=space_1,
+        )
+
+        merge_task = AsyncCacheRefresher.submit_unit_merge_refresh(
+            space=space_1,
+            source_unit_id=600,
+            target_unit_id=500,
+        )
+
+        merge_task.refresh_from_db()
+        assert merge_task.status == CacheRefreshStatus.SKIPPED.value
+        assert merge_task.merged_into_task_id == existing.id
+
+
+def test_submit_different_units_no_conflict(space_1):
+    with scopes_disabled():
+        CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=700,
+            status=CacheRefreshStatus.PENDING.value,
+            space=space_1,
+        )
+
+        new_task = AsyncCacheRefresher.submit_unit_save_refresh(
+            space=space_1,
+            unit_id=800,
+        )
+
+        new_task.refresh_from_db()
+        assert new_task.status == CacheRefreshStatus.PENDING.value
+        assert new_task.merged_into_task is None
+
+
+def test_get_unit_ids_for_task_save(space_1):
+    with scopes_disabled():
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=1000,
+            space=space_1,
+        )
+        unit_ids = AsyncCacheRefresher._get_unit_ids_for_task(task)
+        assert unit_ids == [1000]
+
+
+def test_get_unit_ids_for_task_delete(space_1):
+    with scopes_disabled():
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_DELETE.value,
+            source_unit_id=1100,
+            space=space_1,
+        )
+        unit_ids = AsyncCacheRefresher._get_unit_ids_for_task(task)
+        assert unit_ids == [1100]
+
+
+def test_get_unit_ids_for_task_merge(space_1):
+    with scopes_disabled():
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_MERGE.value,
+            source_unit_id=1200,
+            target_unit_id=1300,
+            space=space_1,
+        )
+        unit_ids = AsyncCacheRefresher._get_unit_ids_for_task(task)
+        assert 1200 in unit_ids
+        assert 1300 in unit_ids
+        assert len(unit_ids) == 2
+
+
+def test_get_unit_ids_for_task_merge_same(space_1):
+    with scopes_disabled():
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_MERGE.value,
+            source_unit_id=1400,
+            target_unit_id=1400,
+            space=space_1,
+        )
+        unit_ids = AsyncCacheRefresher._get_unit_ids_for_task(task)
+        assert unit_ids == [1400]
+
+
+def test_memory_lock_basic_operations(space_1):
+    refresher = AsyncCacheRefresher()
+
+    space_id = space_1.id
+    unit_id = 9999
+
+    assert refresher._is_unit_locked(space_id, unit_id) is False
+
+    acquired = refresher._acquire_unit_lock(space_id, unit_id)
+    assert acquired is True
+    assert refresher._is_unit_locked(space_id, unit_id) is True
+
+    acquired_again = refresher._acquire_unit_lock(space_id, unit_id)
+    assert acquired_again is False
+
+    refresher._release_unit_lock(space_id, unit_id)
+    assert refresher._is_unit_locked(space_id, unit_id) is False
+
+    acquired_third = refresher._acquire_unit_lock(space_id, unit_id)
+    assert acquired_third is True
+    refresher._release_unit_lock(space_id, unit_id)
+
+
+def test_memory_lock_none_unit_id(space_1):
+    refresher = AsyncCacheRefresher()
+
+    assert refresher._is_unit_locked(space_1.id, None) is False
+
+    acquired = refresher._acquire_unit_lock(space_1.id, None)
+    assert acquired is True
+
+    refresher._release_unit_lock(space_1.id, None)
+    assert refresher._is_unit_locked(space_1.id, None) is False
+
+
+def test_memory_lock_different_units_independent(space_1):
+    refresher = AsyncCacheRefresher()
+
+    space_id = space_1.id
+
+    acquired_1 = refresher._acquire_unit_lock(space_id, 10000)
+    assert acquired_1 is True
+
+    acquired_2 = refresher._acquire_unit_lock(space_id, 10001)
+    assert acquired_2 is True
+
+    assert refresher._is_unit_locked(space_id, 10000) is True
+    assert refresher._is_unit_locked(space_id, 10001) is True
+
+    refresher._release_unit_lock(space_id, 10000)
+    assert refresher._is_unit_locked(space_id, 10000) is False
+    assert refresher._is_unit_locked(space_id, 10001) is True
+
+    refresher._release_unit_lock(space_id, 10001)
+
+
+def test_memory_lock_different_spaces_independent(space_1, space_2):
+    refresher = AsyncCacheRefresher()
+
+    unit_id = 20000
+
+    acquired_s1 = refresher._acquire_unit_lock(space_1.id, unit_id)
+    assert acquired_s1 is True
+
+    acquired_s2 = refresher._acquire_unit_lock(space_2.id, unit_id)
+    assert acquired_s2 is True
+
+    assert refresher._is_unit_locked(space_1.id, unit_id) is True
+    assert refresher._is_unit_locked(space_2.id, unit_id) is True
+
+    refresher._release_unit_lock(space_1.id, unit_id)
+    refresher._release_unit_lock(space_2.id, unit_id)
+
+
+def test_check_and_handle_conflict_save(space_1):
+    with scopes_disabled():
+        existing = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_MERGE.value,
+            source_unit_id=2500,
+            target_unit_id=2501,
+            status=CacheRefreshStatus.RUNNING.value,
+            space=space_1,
+        )
+
+        new_task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=2500,
+            status=CacheRefreshStatus.PENDING.value,
+            space=space_1,
+        )
+
+        merged = AsyncCacheRefresher._check_and_handle_conflict(new_task)
+        assert merged is not None
+        assert merged.id == existing.id
+
+        new_task.refresh_from_db()
+        assert new_task.status == CacheRefreshStatus.SKIPPED.value
+        assert new_task.merged_into_task_id == existing.id
+
+
+def test_check_and_handle_conflict_no_conflict(space_1):
+    with scopes_disabled():
+        CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=3000,
+            status=CacheRefreshStatus.COMPLETED.value,
+            space=space_1,
+        )
+
+        new_task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=3000,
+            status=CacheRefreshStatus.PENDING.value,
+            space=space_1,
+        )
+
+        merged = AsyncCacheRefresher._check_and_handle_conflict(new_task)
+        assert merged is None
+
+        new_task.refresh_from_db()
+        assert new_task.status == CacheRefreshStatus.PENDING.value
+
+
+def test_skipped_task_bypasses_processing(space_1):
+    import logging
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        test_cache_keys = []
+        for i in range(5):
+            key = f'{cache_helper.DELETE_COLLECTOR_CACHE_PREFIX}SKIP_TEST_{i}'
+            caches['default'].set(key, f'data_{i}', 60)
+            test_cache_keys.append(key)
+
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=9000,
+            space=space_1,
+            cache_patterns=test_cache_keys,
+            status=CacheRefreshStatus.SKIPPED.value,
+        )
+
+        work = RefreshWork(task=task, cache_patterns=test_cache_keys)
+        AsyncCacheRefresher.process_refresh_work(work, logging.getLogger('test'))
+
+        task.refresh_from_db()
+        assert task.status == CacheRefreshStatus.SKIPPED.value
+
+        remaining = sum(1 for k in test_cache_keys if caches['default'].get(k) is not None)
+        assert remaining == len(test_cache_keys)

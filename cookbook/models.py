@@ -1821,6 +1821,7 @@ class CacheRefreshStatus(Enum):
     COMPLETED = 'COMPLETED'
     FAILED = 'FAILED'
     RETRYING = 'RETRYING'
+    SKIPPED = 'SKIPPED'
 
 
 class CacheRefreshType(Enum):
@@ -1836,6 +1837,7 @@ class CacheRefreshTask(models.Model, PermissionModelMixin):
         (CacheRefreshStatus.COMPLETED.value, _('Completed')),
         (CacheRefreshStatus.FAILED.value, _('Failed')),
         (CacheRefreshStatus.RETRYING.value, _('Retrying')),
+        (CacheRefreshStatus.SKIPPED.value, _('Skipped')),
     )
 
     TYPE_CHOICES = (
@@ -1863,6 +1865,14 @@ class CacheRefreshTask(models.Model, PermissionModelMixin):
 
     error_message = models.TextField(default='', blank=True)
 
+    merged_into_task = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='merged_tasks',
+    )
+
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
@@ -1880,6 +1890,7 @@ class CacheRefreshTask(models.Model, PermissionModelMixin):
         indexes = (
             Index(fields=['space', 'status']),
             Index(fields=['-created_at']),
+            Index(fields=['space', 'source_unit_id', 'status']),
         )
 
     def can_retry(self):
@@ -1918,3 +1929,14 @@ class CacheRefreshTask(models.Model, PermissionModelMixin):
         self.completed_at = timezone.now()
         self.error_message = error_message
         self.save(update_fields=['status', 'completed_at', 'error_message'])
+
+    def mark_skipped(self, message='', merged_into_task=None):
+        self.status = CacheRefreshStatus.SKIPPED.value
+        self.completed_at = timezone.now()
+        self.message = message
+        if merged_into_task is not None:
+            self.merged_into_task = merged_into_task
+        update_fields = ['status', 'completed_at', 'message']
+        if merged_into_task is not None:
+            update_fields.append('merged_into_task')
+        self.save(update_fields=update_fields)
