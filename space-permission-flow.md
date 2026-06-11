@@ -101,6 +101,120 @@ def __call__(self, request):
 - `/switch-space/` - 空间切换
 - `/signup/`, `/invite/`, `/accounts/` - 认证相关
 
+---
+
+#### 2.2.1 关键薄弱路径：带 `share` 参数的 Recipe GET 请求
+
+**豁免条件** [scope_middleware.py:27-35](cookbook/helper/scope_middleware.py:27)：
+```python
+if (request.GET.get('share')
+        and re.match(rf'^{re.escape(prefix)}/api/recipe/\d+/?$', request.path)
+        and request.method in ('GET', 'HEAD', 'OPTIONS')):
+    with scopes_disabled():
+        request.space = None
+        return self.get_response(request)
+```
+
+**豁免行为**：
+1. 跳过 `scope(space=X)` 上下文，直接进入 `scopes_disabled()`
+2. `request.space = None` — 不绑定任何空间
+3. 匿名用户也可以访问（因为走的是 scope_middleware.py:81-96 的未认证分支，也是 `scopes_disabled()`）
+
+##### 完整请求链路分析
+
+```
+GET /api/recipe/42/?share=550e8400-e29b-41d4-a716-446655440000
+    ↓
+ScopeMiddleware
+    ├─ 命中 share 豁免条件
+    ├─ request.space = None
+    └─ with scopes_disabled():  ← ⚠️  所有查询不受 space 隔离
+        ↓
+DRF 路由 → RecipeViewSet.retrieve()
+    ↓
+RecipeViewSet.get_queryset() [views/api.py:1771-1806]
+    ├─ self.detail = True
+    ├─ share = '550e8400-...' 存在
+    └─ ❗  不做 space 过滤！直接返回 Recipe.objects.all()
+        ↓
+DRF get_object() → 拿到 recipe_id=42 的 Recipe 对象（可能来自任何空间）
+    ↓
+CustomRecipePermission.has_object_permission() [permission_helper.py:396-410]
+    ├─ share 参数存在 → 调用 share_link_valid(obj, share)
+    └─ 校验通过则 return True
+    ↓
+RecipeSerializer → 返回完整 Recipe 数据（含步骤、食材等）
+```
+
+##### 匿名用户实际能摸到的数据边界
+
+| 场景 | 代码判定 | 结果 |
+|------|---------|------|
+| share link 有效（recipe+uuid 匹配，未封禁） | `share_link_valid` → True | ✅ 返回完整 recipe，**包括 private=True 的私有食谱** |
+| share link 无效但用户在同一空间 | `obj.space == request.space` 比较，但 `request.space = None` → `obj.space != None` → raise Http404 | ❌ 404（防止枚举） |
+| share link 无效且用户不在该空间 | `obj.space != request.space` → raise Http404 | ❌ 404（防止枚举） |
+| recipe 不存在（id 乱猜） | DRF get_object 查不到 | ❌ 404 |
+
+**关键点**：`share_link_valid(obj, share)` 同时校验 `recipe` 和 `uuid`，即使 `scopes_disabled()` 下可以查所有空间的 ShareLink，也需要恰好匹配 recipe_id + uuid 才能通过。
+
+##### 分享参数有效性校验
+
+**share_link_valid 实现** [permission_helper.py:165-186](cookbook/helper/permission_helper.py:165)：
+```python
+def share_link_valid(recipe, share):
+    CACHE_KEY = f'recipe_share_{recipe.pk}_{share}'
+    if c := cache.get(CACHE_KEY, False):
+        return c  # 3 秒缓存
+    
+    # ⚠️  注意：这里也在 scopes_disabled() 上下文中执行
+    # ShareLink 有 ScopedManager(space='space')，但 scopes_disabled 下查全表
+    if link := ShareLink.objects.filter(
+        recipe=recipe, 
+        uuid=share, 
+        abuse_blocked=False
+    ).first():
+        # 访问次数限制
+        if 0 < settings.SHARING_LIMIT < link.request_count and not link.space.no_sharing_limit:
+            return False
+        link.request_count += 1
+        link.save()
+        cache.set(CACHE_KEY, True, timeout=3)
+        return True
+    return False
+```
+
+**ShareLink 模型** [models.py:1430-1445](cookbook/models.py:1430)：
+```python
+class ShareLink(models.Model):
+    recipe = models.ForeignKey(Recipe, on_delete=models.CASCADE)
+    uuid = models.UUIDField(default=uuid.uuid4)  # UUID v4，122 位熵
+    request_count = models.IntegerField(default=0)
+    abuse_blocked = models.BooleanField(default=False)
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE)
+    space = models.ForeignKey(Space, on_delete=models.CASCADE)
+    objects = ScopedManager(space='space')  # 正常上下文受隔离
+```
+
+##### 分享参数的可猜测/可篡改分析
+
+| 攻击方式 | 可行性 | 说明 |
+|---------|--------|------|
+| 暴力枚举 UUID | ❌ 不可行 | UUID v4 有 122 位随机熵，枚举概率可以忽略 |
+| 修改 recipe_id 保持 uuid | ❌ 不可行 | `ShareLink.objects.filter(recipe=recipe, uuid=share)` 同时匹配两者 |
+| 修改 uuid 保持 recipe_id | ❌ 不可行 | 同上，需要同时匹配 |
+| 猜测已存在的 share link | ❌ 不可行 | 需要同时知道 recipe_id 和 uuid |
+| 篡改已分享链接的访问权限 | ❌ 不可行 | 只读 GET 请求，不能修改 ShareLink |
+| 绕过访问次数限制 | ⚠️  有 3 秒缓存窗口 | 3 秒内重复请求不计入 request_count（但已分享的内容也不会变化） |
+
+**安全边界总结**：
+- ✅ 私有食谱（private=True）通过有效分享链接可以正常访问（设计预期）
+- ✅ 无效分享链接返回 404，不泄漏食谱是否存在
+- ✅ UUID 不可猜测，recipe_id+uuid 双重绑定防篡改
+- ⚠️  scopes_disabled 下 ShareLink 查询全表，但不构成实际风险（因为需要同时匹配 recipe+uuid）
+- ⚠️  `request.space = None` 导致 `obj.space != request.space` 恒成立，所以分享链接无效时无法 fallback 到同空间正常权限（但返回 404 也是合理的）
+
+---
+
 ### 2.3 角色层级与权限继承 [permission_helper.py:22-34]
 
 ```
@@ -410,6 +524,210 @@ def invalidate_household_cache_on_delete(sender, instance=None, **kwargs):
     if instance and instance.household_id:
         caches['default'].delete(f'household_user_ids_{instance.space_id}_{instance.household_id}')
 ```
+
+---
+
+#### 6.2.1 家庭组缓存失效一致性分析：写入 vs 删除
+
+**疑问**：成员增减时按空间和家庭组拼键去删，删除时机和键的拼法跟写入侧是不是严丝合缝？会不会有过期缓存残留？
+
+##### 写入侧键拼法 [permission_helper.py:130-156]
+
+```python
+def get_household_user_ids(user_space):
+    if user_space.household_id:
+        # Case A: 有家庭组 → 按家庭组聚合
+        cache_key = f'household_user_ids_{user_space.space_id}_{user_space.household_id}'
+        result = set(UserSpace.objects.filter(
+            space=user_space.space, 
+            household=user_space.household
+        ).values_list('user_id', flat=True))
+    else:
+        # Case B: 无家庭组 → 用户独立缓存
+        cache_key = f'household_user_ids_{user_space.space_id}_user_{user_space.user_id}'
+        result = {user_space.user_id}
+    
+    cache.set(cache_key, result, timeout=5 * 60)
+    return result
+```
+
+| 场景 | 键模式 | 缓存内容 |
+|------|--------|---------|
+| 用户 U 在家庭组 H | `household_user_ids_{S}_{H}` | [U1_id, U2_id, U3_id, ...] |
+| 用户 U 不在任何家庭组 | `household_user_ids_{S}_user_{U}` | [U_id] |
+
+##### 删除侧键拼法对比
+
+让我们逐个信号场景对照：
+
+| 触发场景 | 删除的键 | 对应写入场景 | 是否匹配 |
+|---------|---------|------------|---------|
+| **post_save**, household_id=H (非空) | `household_user_ids_{S}_{H}` | Case A | ✅ 匹配 |
+| **post_save**, old_household_id=H_old (变化了) | `household_user_ids_{S}_{H_old}` | Case A（旧的） | ✅ 匹配 |
+| **post_save**, household_id=None (空) | `household_user_ids_{S}_user_{U_id}` | Case B | ✅ 匹配 |
+| **post_delete**, household_id=H (非空) | `household_user_ids_{S}_{H}` | Case A | ✅ 匹配 |
+| **post_delete**, household_id=None (空) | **无！不删除任何键** | Case B | ❌ **遗漏** |
+
+##### 五种成员增减场景的逐一场景分析
+
+**场景 1：新用户加入空间，指定家庭组 H**
+```
+UserSpace.objects.create(space=S, user=U_new, household=H, ...)
+    ↓
+pre_save: instance.pk 不存在 → _old_household_id = None
+    ↓
+post_save:
+    instance.household_id = H → delete(`household_user_ids_{S}_{H}`) ✅
+    _old_household_id = None → 跳过
+    not instance.household_id = False → 跳过
+```
+**结果**：家庭组 H 的缓存被正确删除。新用户下一次 get_household_user_ids 会重新查询。
+
+**场景 2：新用户加入空间，不指定家庭组（独立用户）**
+```
+UserSpace.objects.create(space=S, user=U_new, household=None, ...)
+    ↓
+pre_save: _old_household_id = None
+    ↓
+post_save:
+    instance.household_id = None → 跳过
+    _old_household_id = None → 跳过
+    not instance.household_id = True → delete(`household_user_ids_{S}_user_{U_new}`) ✅
+```
+**结果**：该用户的独立缓存被正确删除。下一次查询会重新写入。
+
+**场景 3：已有用户从「独立」→「加入家庭组 H」**
+```
+# 修改前：user_space.household_id = None
+# 修改后：user_space.household_id = H
+user_space.save()
+    ↓
+pre_save: _old_household_id = None (捕获成功)
+    ↓
+post_save:
+    instance.household_id = H → delete(`household_user_ids_{S}_{H}`) ✅（删除新家庭组缓存）
+    _old_household_id = None → 跳过（因为 None 与 H 不等，但条件是 old_household_id and ...）
+    not instance.household_id = False → 跳过
+```
+**⚠️ 问题**：该用户之前的独立缓存 `household_user_ids_{S}_user_{U_id}` **没有被删除**！
+- 如果接下来另一个查询传入的 UserSpace 还是 household=None（例如同一进程中缓存了旧的 UserSpace 对象），会命中残留缓存，返回 `[U_id]`（过期数据，不包含新的家庭成员）。
+- 残留时间：最长 5 分钟 TTL。
+
+**场景 4：已有用户从「家庭组 H_old」→「切换到家庭组 H_new」**
+```
+# 修改前：user_space.household_id = H_old
+# 修改后：user_space.household_id = H_new
+user_space.save()
+    ↓
+pre_save: _old_household_id = H_old (捕获成功)
+    ↓
+post_save:
+    instance.household_id = H_new → delete(`household_user_ids_{S}_{H_new}`) ✅
+    _old_household_id = H_old ≠ H_new → delete(`household_user_ids_{S}_{H_old}`) ✅
+    not instance.household_id = False → 跳过
+```
+**结果**：新旧家庭组缓存都被正确删除。✅
+
+**场景 5：已有用户从「家庭组 H」→「改为独立（无家庭组）」**
+```
+# 修改前：user_space.household_id = H
+# 修改后：user_space.household_id = None
+user_space.save()
+    ↓
+pre_save: _old_household_id = H (捕获成功)
+    ↓
+post_save:
+    instance.household_id = None → 跳过
+    _old_household_id = H ≠ None → delete(`household_user_ids_{S}_{H}`) ✅（删除旧家庭组缓存）
+    not instance.household_id = True → delete(`household_user_ids_{S}_user_{U_id}`) ✅（删除用户独立缓存）
+```
+**结果**：新旧缓存都被正确删除。✅
+
+**场景 6：删除一个有家庭组的 UserSpace**
+```
+# 被删除的 user_space.household_id = H
+user_space.delete()
+    ↓
+post_delete:
+    instance.household_id = H → delete(`household_user_ids_{S}_{H}`) ✅
+```
+**结果**：家庭组 H 的缓存被正确删除。✅
+
+**场景 7：删除一个无家庭组的 UserSpace（独立用户）**
+```
+# 被删除的 user_space.household_id = None
+user_space.delete()
+    ↓
+post_delete:
+    instance.household_id = None → **不删除任何键** ❌
+```
+**⚠️ 问题**：该用户的独立缓存 `household_user_ids_{S}_user_{U_id}` **没有被删除**！
+- 如果该用户后续被重新加入同一空间（household=None），且 5 分钟内有查询，可能命中残留缓存
+- 但因为用户已被删除，通常不会有查询传入该 UserSpace，风险较低
+
+##### 家庭组缓存使用位置及误用后果
+
+`get_household_user_ids` 被用于：
+1. **MealPlan 查询** [views/api.py:1497-1499]：
+   ```python
+   queryset.filter(
+       Q(created_by=self.request.user) |
+       Q(created_by_id__in=get_household_user_ids(self.request.user_space))
+   )
+   ```
+   - 误用后果：**看不到新加入家庭成员的 MealPlan**，或者**还能看到已离开成员的 MealPlan**
+
+2. **ShoppingList 查询** [views/api.py:2196-2198]：
+   ```python
+   filter(Q(entries__created_by=self.request.user) |
+          Q(entries__created_by__in=get_household_user_ids(...)))
+   ```
+   - 误用后果：购物列表项显示不正确
+
+3. **Food on_hand 批量操作** [views/api.py:1326-1327]：
+   ```python
+   household_user_ids = list(get_household_user_ids(request.user_space))
+   ```
+   - 误用后果：批量设置库存时，可能漏掉新成员或包含已离开成员
+
+##### 结论与修复建议
+
+**家庭组缓存失效一致性结论**：
+- ✅ **大部分场景**（加入家庭组、切换家庭组、离开家庭组、删除有家庭组用户）失效正确
+- ❌ **两个场景有遗漏**：
+  1. 独立用户 → 加入家庭组时，原独立缓存未删除（场景 3）
+  2. 删除独立用户时，独立缓存未删除（场景 7）
+- ⚠️ **风险等级**：中等。最坏情况 5 分钟内成员关系不一致，不会导致越权，只会显示/操作不正确
+
+**修复建议**：
+```python
+# 修复 post_save 场景 3：独立→家庭组时，额外删除原独立缓存
+@receiver(post_save, sender=UserSpace)
+def invalidate_household_cache_on_save(sender, instance=None, **kwargs):
+    if not instance:
+        return
+    if instance.household_id:
+        caches['default'].delete(f'household_user_ids_{instance.space_id}_{instance.household_id}')
+    old_household_id = getattr(instance, '_old_household_id', None)
+    if old_household_id and old_household_id != instance.household_id:
+        caches['default'].delete(f'household_user_ids_{instance.space_id}_{old_household_id}')
+    if not instance.household_id:
+        caches['default'].delete(f'household_user_ids_{instance.space_id}_user_{instance.user_id}')
+    # ✅ 新增：从独立→家庭组时，删除原独立缓存
+    elif old_household_id is None and instance.household_id is not None:
+        caches['default'].delete(f'household_user_ids_{instance.space_id}_user_{instance.user_id}')
+
+# 修复 post_delete 场景 7：删除独立用户时也删除独立缓存
+@receiver(post_delete, sender=UserSpace)
+def invalidate_household_cache_on_delete(sender, instance=None, **kwargs):
+    if instance and instance.household_id:
+        caches['default'].delete(f'household_user_ids_{instance.space_id}_{instance.household_id}')
+    # ✅ 新增：独立用户删除时也删除独立缓存
+    elif instance and not instance.household_id:
+        caches['default'].delete(f'household_user_ids_{instance.space_id}_user_{instance.user_id}')
+```
+
+---
 
 ### 6.3 ShareLink 缓存 [permission_helper.py:165-186]
 
