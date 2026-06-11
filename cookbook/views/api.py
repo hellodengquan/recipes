@@ -1670,10 +1670,33 @@ class MealPlanShoppingSyncViewSet(LoggingMixin, viewsets.GenericViewSet):
         if not has_permission:
             raise PermissionDenied(detail=error_msg, code=403)
 
+        provided_token = serializer.validated_data.get('sync_token')
+
+        token_valid, token_error = sync.validate_sync_token(provided_token)
+        if not token_valid:
+            return Response({
+                'added': 0,
+                'merged': 0,
+                'removed': 0,
+                'failed': 1,
+                'errors': [f"Sync token validation failed: {token_error}"],
+                'rolled_back': False,
+                'token_invalid': True,
+                'token_error': token_error
+            }, status=status.HTTP_409_CONFLICT)
+
         preview = sync.calculate_changes()
         selected_changes = serializer.validated_data.get('selected_changes', None)
 
-        results = sync.apply_changes(preview, selected_changes=selected_changes)
+        results = sync.apply_changes(
+            preview,
+            selected_changes=selected_changes,
+            sync_token=provided_token
+        )
+
+        if results['token_invalid']:
+            return Response(results, status=status.HTTP_409_CONFLICT)
+
         return Response(results, status=status.HTTP_200_OK)
 
 

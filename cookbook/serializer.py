@@ -2251,6 +2251,10 @@ class MealPlanShoppingSyncApplyRequestSerializer(MealPlanShoppingSyncPreviewRequ
         required=False,
         help_text=_('Indices of changes to apply. If not provided, all changes will be applied.')
     )
+    sync_token = serializers.CharField(
+        required=True,
+        help_text=_('Sync token returned from the preview endpoint. Used to detect concurrent modifications.')
+    )
 
 
 class ShoppingSyncIngredientSerializer(serializers.Serializer):
@@ -2275,6 +2279,7 @@ class ShoppingSyncChangeSerializer(serializers.Serializer):
 class ShoppingSyncPreviewSerializer(serializers.Serializer):
     changes = ShoppingSyncChangeSerializer(many=True)
     summary = serializers.DictField(child=serializers.IntegerField())
+    sync_token = serializers.CharField(help_text=_('Token for validating data consistency when applying changes'))
 
 
 class ShoppingSyncApplyResultSerializer(serializers.Serializer):
@@ -2284,3 +2289,5 @@ class ShoppingSyncApplyResultSerializer(serializers.Serializer):
     failed = serializers.IntegerField()
     errors = serializers.ListField(child=serializers.CharField())
     rolled_back = serializers.BooleanField()
+    token_invalid = serializers.BooleanField()
+    token_error = serializers.CharField(allow_null=True)

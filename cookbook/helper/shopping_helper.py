@@ -1,4 +1,5 @@
 
+import hashlib
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
@@ -250,6 +251,7 @@ class ShoppingSyncChange:
 class ShoppingSyncPreview:
     changes: List[ShoppingSyncChange] = field(default_factory=list)
     summary: Dict[str, int] = field(default_factory=dict)
+    sync_token: Optional[str] = None
 
     def calculate_summary(self):
         self.summary = {
@@ -262,7 +264,8 @@ class ShoppingSyncPreview:
         self.calculate_summary()
         return {
             'changes': [c.to_dict() for c in self.changes],
-            'summary': self.summary
+            'summary': self.summary,
+            'sync_token': self.sync_token
         }
 
 
@@ -396,6 +399,33 @@ class MealPlanShoppingSync:
 
         return False
 
+    def _generate_sync_token(self) -> str:
+        meal_plans = self._get_meal_plans()
+        all_slrs = self._get_all_shopping_recipes()
+
+        token_parts = []
+
+        for mp in meal_plans.order_by('id'):
+            token_parts.append(f"mp:{mp.id}:{mp.updated_at.isoformat() if mp.updated_at else ''}:{mp.servings}")
+
+        for slr in all_slrs.order_by('id'):
+            token_parts.append(f"slr:{slr.id}:{slr.updated_at.isoformat() if slr.updated_at else ''}:{slr.servings}")
+            for entry in slr.entries.order_by('id').all():
+                token_parts.append(f"sle:{entry.id}:{entry.updated_at.isoformat() if entry.updated_at else ''}")
+
+        token_data = "|".join(token_parts)
+        return hashlib.sha256(token_data.encode('utf-8')).hexdigest()
+
+    def validate_sync_token(self, provided_token: Optional[str]) -> Tuple[bool, Optional[str]]:
+        if not provided_token:
+            return False, _('Sync token is required. Please generate a new preview.')
+
+        current_token = self._generate_sync_token()
+        if current_token != provided_token:
+            return False, _('Data has been modified by another user. Please generate a new preview and try again.')
+
+        return True, None
+
     def calculate_changes(self) -> ShoppingSyncPreview:
         preview = ShoppingSyncPreview()
 
@@ -472,17 +502,28 @@ class MealPlanShoppingSync:
                     ))
 
         preview.calculate_summary()
+        preview.sync_token = self._generate_sync_token()
         return preview
 
-    def apply_changes(self, preview: ShoppingSyncPreview, selected_changes: Optional[List[int]] = None) -> Dict:
+    def apply_changes(self, preview: ShoppingSyncPreview, selected_changes: Optional[List[int]] = None, sync_token: Optional[str] = None) -> Dict:
         results = {
             'added': 0,
             'merged': 0,
             'removed': 0,
             'failed': 0,
             'errors': [],
-            'rolled_back': False
+            'rolled_back': False,
+            'token_invalid': False,
+            'token_error': None
         }
+
+        token_valid, token_error = self.validate_sync_token(sync_token)
+        if not token_valid:
+            results['token_invalid'] = True
+            results['token_error'] = token_error
+            results['failed'] = len(preview.changes)
+            results['errors'].append(f"Sync token validation failed: {token_error}")
+            return results
 
         changes_to_apply = preview.changes
         if selected_changes is not None:

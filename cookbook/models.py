@@ -1276,6 +1276,9 @@ class MealPlan(ExportModelOperationsMixin('meal_plan'), models.Model, Permission
     from_date = models.DateTimeField()
     to_date = models.DateTimeField()
 
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
     space = models.ForeignKey(Space, on_delete=models.CASCADE)
     objects = ScopedManager(space='space')
 
@@ -1301,8 +1304,10 @@ class ShoppingListRecipe(ExportModelOperationsMixin('shopping_list_recipe'), mod
     mealplan = models.ForeignKey(MealPlan, on_delete=models.CASCADE, null=True, blank=True)
 
     created_by = models.ForeignKey(User, on_delete=models.CASCADE)
-    space = models.ForeignKey(Space, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
+    space = models.ForeignKey(Space, on_delete=models.CASCADE)
     objects = ScopedManager(space='space')
 
     # def __str__(self):
