@@ -815,11 +815,9 @@ class Unit(ExportModelOperationsMixin('unit'), models.Model, PermissionModelMixi
 
     def _clear_unit_caches(self):
         from cookbook.helper.cache_helper import CacheHelper
-        from cookbook.helper.unit_conversion_helper import UnitConversionHelper
 
         cache_helper = CacheHelper(self.space)
-        caches['default'].delete(cache_helper.BASE_UNITS_CACHE_KEY)
-        UnitConversionHelper._base_units_cache.pop(self.space.id, None)
+        cache_helper.clear_unit_related_caches()
 
     def __str__(self):
         return self.name

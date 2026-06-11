@@ -437,3 +437,124 @@ def test_convert_from_to_precision():
 
     result = UnitConversionHelper.convert_from_to('kg', 'pound', 2)
     assert abs(result - Decimal('4.40924')) < Decimal('0.00001')
+
+
+def test_merge_clears_property_type_cache(u1_s1, space_1, unit_gram, unit_kg):
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        caches['default'].set(cache_helper.PROPERTY_TYPE_CACHE_KEY, ['test_property_data'], 60)
+
+        assert caches['default'].get(cache_helper.PROPERTY_TYPE_CACHE_KEY) is not None
+
+    url = reverse(MERGE_URL, args=[unit_gram.id, unit_kg.id])
+    r = u1_s1.put(url)
+    assert r.status_code == 200
+
+    with scopes_disabled():
+        assert caches['default'].get(cache_helper.PROPERTY_TYPE_CACHE_KEY) is None
+
+
+def test_delete_clears_property_type_cache(u1_s1, space_1, unit_gram):
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        caches['default'].set(cache_helper.PROPERTY_TYPE_CACHE_KEY, ['test_property_data'], 60)
+
+        assert caches['default'].get(cache_helper.PROPERTY_TYPE_CACHE_KEY) is not None
+
+    url = reverse(DETAIL_URL, args=[unit_gram.id])
+    r = u1_s1.delete(url)
+    assert r.status_code == 204
+
+    with scopes_disabled():
+        assert caches['default'].get(cache_helper.PROPERTY_TYPE_CACHE_KEY) is None
+
+
+def test_save_clears_all_unit_related_caches(u1_s1, space_1, unit_gram):
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        caches['default'].set(cache_helper.BASE_UNITS_CACHE_KEY, ['test_data'], 60)
+        caches['default'].set(cache_helper.PROPERTY_TYPE_CACHE_KEY, ['test_property_data'], 60)
+        UnitConversionHelper._base_units_cache[space_1.id] = ['test_data']
+
+        assert caches['default'].get(cache_helper.BASE_UNITS_CACHE_KEY) is not None
+        assert caches['default'].get(cache_helper.PROPERTY_TYPE_CACHE_KEY) is not None
+        assert space_1.id in UnitConversionHelper._base_units_cache
+
+    url = reverse(DETAIL_URL, args=[unit_gram.id])
+    r = u1_s1.patch(url, {'name': 'gram_updated'}, content_type='application/json')
+    assert r.status_code == 200
+
+    with scopes_disabled():
+        assert caches['default'].get(cache_helper.BASE_UNITS_CACHE_KEY) is None
+        assert caches['default'].get(cache_helper.PROPERTY_TYPE_CACHE_KEY) is None
+        assert space_1.id not in UnitConversionHelper._base_units_cache
+
+
+def test_merge_backfills_ingredient_amounts(u1_s1, space_1, unit_gram, unit_kg, recipe_1_s1):
+    with scopes_disabled():
+        food = random_food(space_1, u1_s1)
+        step = recipe_1_s1.steps.first()
+        ingredient = Ingredient.objects.create(
+            food=food,
+            unit=unit_gram,
+            amount=Decimal('2000'),
+            step=step,
+            space=space_1
+        )
+
+        assert ingredient.unit == unit_gram
+        assert ingredient.amount == Decimal('2000')
+
+    url = reverse(MERGE_URL, args=[unit_gram.id, unit_kg.id])
+    r = u1_s1.put(url)
+    assert r.status_code == 200
+
+    with scopes_disabled():
+        ingredient.refresh_from_db()
+        assert ingredient.unit == unit_kg
+        assert abs(ingredient.amount - Decimal('2')) < Decimal('0.0001')
+
+
+def test_merge_backfills_shopping_list_entry_amounts(u1_s1, space_1, unit_gram, unit_kg):
+    with scopes_disabled():
+        food = random_food(space_1, u1_s1)
+        user = auth.get_user(u1_s1)
+        entry = ShoppingListEntry.objects.create(
+            food=food,
+            unit=unit_gram,
+            amount=Decimal('1500'),
+            created_by=user,
+            space=space_1
+        )
+
+        assert entry.unit == unit_gram
+        assert entry.amount == Decimal('1500')
+
+    url = reverse(MERGE_URL, args=[unit_gram.id, unit_kg.id])
+    r = u1_s1.put(url)
+    assert r.status_code == 200
+
+    with scopes_disabled():
+        entry.refresh_from_db()
+        assert entry.unit == unit_kg
+        assert abs(entry.amount - Decimal('1.5')) < Decimal('0.0001')
+
+
+def test_cache_helper_clear_unit_related_caches(space_1):
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        caches['default'].set(cache_helper.BASE_UNITS_CACHE_KEY, ['test_data'], 60)
+        caches['default'].set(cache_helper.PROPERTY_TYPE_CACHE_KEY, ['test_property_data'], 60)
+        UnitConversionHelper._base_units_cache[space_1.id] = ['test_data']
+        caches['default'].set(f'{cache_helper.DELETE_COLLECTOR_CACHE_PREFIX}PROTECTING_Unit_1', ['test'], 60)
+        caches['default'].set(f'{cache_helper.DELETE_COLLECTOR_CACHE_PREFIX}CASCADING_Ingredient_5', ['test'], 60)
+
+        assert caches['default'].get(cache_helper.BASE_UNITS_CACHE_KEY) is not None
+        assert caches['default'].get(cache_helper.PROPERTY_TYPE_CACHE_KEY) is not None
+        assert space_1.id in UnitConversionHelper._base_units_cache
+
+        cache_helper.clear_unit_related_caches()
+
+        assert caches['default'].get(cache_helper.BASE_UNITS_CACHE_KEY) is None
+        assert caches['default'].get(cache_helper.PROPERTY_TYPE_CACHE_KEY) is None
+        assert space_1.id not in UnitConversionHelper._base_units_cache
