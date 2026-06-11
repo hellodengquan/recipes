@@ -346,7 +346,12 @@ class Command(BaseCommand):
 
                 keywords = {}
                 for kw_name in space_config['keywords']:
-                    keyword, created = Keyword.objects.get_or_create(name=kw_name, space=space)
+                    keyword = Keyword.objects.filter(name__iexact=kw_name, space=space).first()
+                    if keyword is None:
+                        keyword = Keyword.add_root(name=kw_name.strip(), space=space)
+                        created = True
+                    else:
+                        created = False
                     keywords[kw_name] = keyword
                     if created:
                         self.stdout.write(f'  Created keyword: {kw_name}')
@@ -362,7 +367,9 @@ class Command(BaseCommand):
 
                 foods = {}
                 for food_name in space_config['foods']:
-                    food, created = Food.objects.get_or_create(name=food_name, space=space)
+                    food = Food.objects.filter(name__iexact=food_name, space=space).first()
+                    if food is None:
+                        food = Food.add_root(name=food_name.strip(), space=space)
                     foods[food_name] = food
 
                 meal_types = {}
