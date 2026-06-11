@@ -35,7 +35,7 @@ from cookbook.helper.unit_conversion_helper import UnitConversionHelper
 from cookbook.models import (Automation, BookmarkletImport, Comment, CookLog, CustomFilter,
                              ExportLog, Food, FoodInheritField, ImportLog, Ingredient, InviteLink,
                              Keyword, MealPlan, MealType, NutritionInformation, Property,
-                             PropertyType, Recipe, RecipeBook, RecipeBookEntry, RecipeBookEntryChangeRequest, RecipeImport,
+                             PropertyType, Recipe, RecipeBook, RecipeBookEntry, RecipeBookEntryChangeRequest, ChangeRequestDraft, RecipeImport,
                              ShareLink, ShoppingListEntry, ShoppingListRecipe, Space,
                              Step, Storage, Supermarket, SupermarketCategory,
                              SupermarketCategoryRelation, Sync, SyncLog, Unit, UnitConversion,
@@ -1485,6 +1485,13 @@ class RecipeBookChangeRequestReviewSerializer(serializers.Serializer):
 
 class RecipeBookChangeRequestResubmitSerializer(serializers.Serializer):
     note = serializers.CharField(required=False, allow_blank=True)
+
+
+class ChangeRequestDraftSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ChangeRequestDraft
+        fields = ('id', 'book', 'change_request', 'draft_type', 'recipe_id', 'recipe_name', 'note', 'updated_at')
+        read_only_fields = ('id', 'updated_at')
 
 
 class MealPlanSerializer(SpacedModelSerializer, WritableNestedModelSerializer):

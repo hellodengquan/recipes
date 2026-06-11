@@ -72,13 +72,14 @@
                             :placeholder="$t('RequestNotePlaceholder')"
                             class="mt-2"
                         ></v-text-field>
-                        <div v-if="hasAddDraft" class="d-flex align-center mt-2">
-                            <v-icon icon="$save" size="small" color="info" class="me-2"></v-icon>
+                        <div v-if="draftSource" class="d-flex align-center mt-2">
+                            <v-icon icon="$save" size="small" :color="draftSource === 'server' ? 'primary' : 'info'" class="me-2"></v-icon>
                             <span class="text-caption text-grey">
-                                {{ $t('DraftSavedAt', { time: formatDraftTime(addDraftSavedAt) }) }}
+                                <template v-if="draftSource === 'server'">{{ $t('DraftSyncedAt', { time: formatDraftTime(serverDraftUpdatedAt) }) }}</template>
+                                <template v-else>{{ $t('DraftSavedAt', { time: formatDraftTime(addDraftSavedAt) }) }}</template>
                             </span>
                             <v-spacer></v-spacer>
-                            <v-btn size="x-small" variant="text" color="grey" @click="clearAddDraftLocal">
+                            <v-btn size="x-small" variant="text" color="grey" @click="clearAddDraftAll">
                                 {{ $t('ClearDraft') }}
                             </v-btn>
                         </div>
@@ -237,6 +238,48 @@
             </v-card-actions>
         </v-card>
     </v-dialog>
+
+    <v-dialog v-model="conflictDialogVisible" width="520">
+        <v-card>
+            <v-card-title>{{ $t('DraftConflictTitle') }}</v-card-title>
+            <v-card-text>
+                <p class="mb-4">{{ $t('DraftConflictDesc') }}</p>
+                <v-row>
+                    <v-col cols="6">
+                        <v-card variant="outlined" class="pa-3" :class="{ 'border-primary': conflictChoice === 'local' }" style="cursor: pointer;" @click="conflictChoice = 'local'">
+                            <div class="text-subtitle-2 mb-1">{{ $t('DraftLocal') }}</div>
+                            <div class="text-caption text-grey mb-2">{{ $t('DraftSavedAt', { time: formatDraftTime(conflictLocalDraft?.savedAt || '') }) }}</div>
+                            <div v-if="conflictLocalDraft?.recipeName" class="text-body-2 mb-1">
+                                <strong>{{ $t('Recipe') }}:</strong> {{ conflictLocalDraft.recipeName }}
+                            </div>
+                            <div v-if="conflictLocalDraft?.note" class="text-body-2">
+                                <strong>{{ $t('RequestNote') }}:</strong> {{ conflictLocalDraft.note.substring(0, 80) }}{{ conflictLocalDraft.note.length > 80 ? '...' : '' }}
+                            </div>
+                        </v-card>
+                    </v-col>
+                    <v-col cols="6">
+                        <v-card variant="outlined" class="pa-3" :class="{ 'border-primary': conflictChoice === 'server' }" style="cursor: pointer;" @click="conflictChoice = 'server'">
+                            <div class="text-subtitle-2 mb-1">{{ $t('DraftServer') }}</div>
+                            <div class="text-caption text-grey mb-2">{{ $t('DraftSyncedAt', { time: formatDraftTime(conflictServerDraft?.updatedAt || '') }) }}</div>
+                            <div v-if="conflictServerDraft?.recipeName" class="text-body-2 mb-1">
+                                <strong>{{ $t('Recipe') }}:</strong> {{ conflictServerDraft.recipeName }}
+                            </div>
+                            <div v-if="conflictServerDraft?.note" class="text-body-2">
+                                <strong>{{ $t('RequestNote') }}:</strong> {{ conflictServerDraft.note.substring(0, 80) }}{{ conflictServerDraft.note.length > 80 ? '...' : '' }}
+                            </div>
+                        </v-card>
+                    </v-col>
+                </v-row>
+            </v-card-text>
+            <v-card-actions>
+                <v-spacer></v-spacer>
+                <v-btn variant="text" @click="conflictDialogVisible = false">{{ $t('Cancel') }}</v-btn>
+                <v-btn color="primary" @click="resolveConflict" :disabled="!conflictChoice">
+                    {{ $t('Apply') }}
+                </v-btn>
+            </v-card-actions>
+        </v-card>
+    </v-dialog>
 </template>
 
 <script setup lang="ts">
@@ -265,6 +308,17 @@ interface AddRequestDraft {
 interface ResubmitDraft {
     note: string
     savedAt: string
+}
+
+interface ServerDraft {
+    id: number
+    book: number
+    changeRequest: number | null
+    draftType: string
+    recipeId: number | null
+    recipeName: string
+    note: string
+    updatedAt: string
 }
 
 function getAddDraftKey(bookId: number | undefined): string {
@@ -345,6 +399,19 @@ function clearResubmitDraft(requestId: number) {
     }
 }
 
+function mapServerDraft(raw: any): ServerDraft {
+    return {
+        id: raw.id,
+        book: raw.book,
+        changeRequest: raw.change_request ?? null,
+        draftType: raw.draft_type,
+        recipeId: raw.recipe_id ?? null,
+        recipeName: raw.recipe_name || '',
+        note: raw.note || '',
+        updatedAt: raw.updated_at || '',
+    }
+}
+
 interface ChangeRequestItem {
     id: number
     book: number
@@ -385,11 +452,20 @@ const changeRequests = ref([] as ChangeRequestItem[])
 const selectedRecipe = ref({} as Recipe)
 const addRequestNote = ref('')
 
+const serverAddDraft = ref<ServerDraft | null>(null)
+const serverAddDraftId = ref<number | null>(null)
+const draftSource = ref<'local' | 'server' | null>(null)
+
 const resubmitDialogVisible = ref(false)
 const resubmittingItem = ref<ChangeRequestItem | null>(null)
 const resubmitNote = ref('')
 const resubmitLoading = ref(false)
 const hasResubmitDraft = ref(false)
+
+const conflictDialogVisible = ref(false)
+const conflictChoice = ref<'local' | 'server' | null>(null)
+const conflictLocalDraft = ref<AddRequestDraft | null>(null)
+const conflictServerDraft = ref<ServerDraft | null>(null)
 
 const tablePage = ref(1)
 const itemCount = ref(0)
@@ -402,14 +478,14 @@ const isOwner = computed(() => {
 })
 const pendingChangeRequestsCount = computed(() => editingObj.value?.pendingChangeRequestsCount || 0)
 
-const hasAddDraft = computed(() => {
-    if (!editingObj.value?.id) return false
-    return loadAddDraft(editingObj.value.id) !== null
-})
 const addDraftSavedAt = computed(() => {
     if (!editingObj.value?.id) return ''
     const draft = loadAddDraft(editingObj.value.id)
     return draft ? draft.savedAt : ''
+})
+
+const serverDraftUpdatedAt = computed(() => {
+    return serverAddDraft.value?.updatedAt || ''
 })
 
 function getStatusColor(status: string): string {
@@ -446,11 +522,14 @@ watch([selectedRecipe, addRequestNote], () => {
     if (!editingObj.value?.id) return
     if (draftSaveTimer) clearTimeout(draftSaveTimer)
     draftSaveTimer = window.setTimeout(() => {
-        saveAddDraft(editingObj.value!.id, {
+        const draftData = {
             recipeId: selectedRecipe.value.id || null,
             recipeName: selectedRecipe.value.name || '',
             note: addRequestNote.value,
-        })
+        }
+        saveAddDraft(editingObj.value!.id, draftData)
+        saveServerAddDraft(draftData)
+        draftSource.value = 'local'
     }, 500)
 }, { deep: true })
 
@@ -459,25 +538,177 @@ watch(resubmitNote, () => {
     saveResubmitDraft(resubmittingItem.value.id, {
         note: resubmitNote.value,
     })
+    saveServerResubmitDraft(resubmittingItem.value.id, resubmitNote.value)
     hasResubmitDraft.value = true
 })
 
 watch(() => editingObj.value?.id, (newId) => {
     if (newId && isUpdate()) {
-        restoreAddDraft()
+        restoreDrafts()
     }
 })
 
-function restoreAddDraft() {
+function saveServerAddDraft(draftData: { recipeId: number | null; recipeName: string; note: string }) {
     if (!editingObj.value?.id) return
-    const draft = loadAddDraft(editingObj.value.id)
-    if (!draft) return
+    const payload: any = {
+        book: editingObj.value.id,
+        draft_type: 'ADD',
+        recipe_id: draftData.recipeId,
+        recipe_name: draftData.recipeName,
+        note: draftData.note,
+        change_request: null,
+    }
+    if (serverAddDraftId.value) {
+        fetch(`/api/change-request-draft/${serverAddDraftId.value}/`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCookie('csrftoken') || '' },
+            credentials: 'same-origin',
+            body: JSON.stringify(payload),
+        }).then(r => r.ok ? r.json() : Promise.reject(r)).then(data => {
+            serverAddDraft.value = mapServerDraft(data)
+            draftSource.value = 'server'
+        }).catch(() => {
+            serverAddDraftId.value = null
+            createServerAddDraft(payload)
+        })
+    } else {
+        createServerAddDraft(payload)
+    }
+}
+
+function createServerAddDraft(payload: any) {
+    fetch(`/api/change-request-draft/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCookie('csrftoken') || '' },
+        credentials: 'same-origin',
+        body: JSON.stringify(payload),
+    }).then(r => r.ok ? r.json() : Promise.reject(r)).then(data => {
+        serverAddDraft.value = mapServerDraft(data)
+        serverAddDraftId.value = data.id
+        draftSource.value = 'server'
+    }).catch(() => {})
+}
+
+function saveServerResubmitDraft(changeRequestId: number, note: string) {
+    const payload: any = {
+        book: editingObj.value!.id,
+        draft_type: 'RESUBMIT',
+        change_request: changeRequestId,
+        recipe_id: null,
+        recipe_name: '',
+        note: note,
+    }
+    fetch(`/api/change-request-draft/?book=${editingObj.value!.id}&change_request=${changeRequestId}`, {
+        credentials: 'same-origin',
+    }).then(r => r.ok ? r.json() : Promise.reject(r)).then(data => {
+        const existing = (data.results || []).find((d: any) => d.change_request === changeRequestId)
+        if (existing) {
+            fetch(`/api/change-request-draft/${existing.id}/`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCookie('csrftoken') || '' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ note }),
+            }).catch(() => {})
+        } else {
+            fetch(`/api/change-request-draft/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCookie('csrftoken') || '' },
+                credentials: 'same-origin',
+                body: JSON.stringify(payload),
+            }).catch(() => {})
+        }
+    }).catch(() => {})
+}
+
+function deleteServerAddDraft() {
+    if (!serverAddDraftId.value) return
+    fetch(`/api/change-request-draft/${serverAddDraftId.value}/`, {
+        method: 'DELETE',
+        headers: { 'X-CSRFToken': getCookie('csrftoken') || '' },
+        credentials: 'same-origin',
+    }).catch(() => {})
+    serverAddDraft.value = null
+    serverAddDraftId.value = null
+}
+
+function deleteServerResubmitDraft(changeRequestId: number) {
+    fetch(`/api/change-request-draft/?book=${editingObj.value!.id}&change_request=${changeRequestId}`, {
+        credentials: 'same-origin',
+    }).then(r => r.ok ? r.json() : Promise.reject(r)).then(data => {
+        const existing = (data.results || []).find((d: any) => d.change_request === changeRequestId)
+        if (existing) {
+            fetch(`/api/change-request-draft/${existing.id}/`, {
+                method: 'DELETE',
+                headers: { 'X-CSRFToken': getCookie('csrftoken') || '' },
+                credentials: 'same-origin',
+            }).catch(() => {})
+        }
+    }).catch(() => {})
+}
+
+function restoreDrafts() {
+    if (!editingObj.value?.id) return
+    const bookId = editingObj.value.id
+
+    const localDraft = loadAddDraft(bookId)
+
+    fetch(`/api/change-request-draft/?book=${bookId}&draft_type=ADD`, {
+        credentials: 'same-origin',
+    }).then(r => r.ok ? r.json() : Promise.reject(r)).then(data => {
+        const results = (data.results || []).map(mapServerDraft)
+        const serverDraft: ServerDraft | null = results.length > 0 ? results[0] : null
+
+        if (serverDraft) {
+            serverAddDraft.value = serverDraft
+            serverAddDraftId.value = serverDraft.id
+        }
+
+        if (localDraft && serverDraft) {
+            const localTime = new Date(localDraft.savedAt).getTime()
+            const serverTime = new Date(serverDraft.updatedAt).getTime()
+            const sameContent = localDraft.recipeId === serverDraft.recipeId
+                && localDraft.note === serverDraft.note
+                && localDraft.recipeName === serverDraft.recipeName
+
+            if (sameContent) {
+                applyDraft(localDraft)
+                draftSource.value = 'server'
+            } else if (Math.abs(localTime - serverTime) < 2000) {
+                applyDraft(localDraft)
+                draftSource.value = 'local'
+            } else {
+                conflictLocalDraft.value = localDraft
+                conflictServerDraft.value = serverDraft
+                conflictChoice.value = serverTime > localTime ? 'server' : 'local'
+                conflictDialogVisible.value = true
+            }
+        } else if (localDraft) {
+            applyDraft(localDraft)
+            draftSource.value = 'local'
+            saveServerAddDraft({
+                recipeId: localDraft.recipeId,
+                recipeName: localDraft.recipeName,
+                note: localDraft.note,
+            })
+        } else if (serverDraft) {
+            applyServerDraft(serverDraft)
+            draftSource.value = 'server'
+        } else {
+            draftSource.value = null
+        }
+    }).catch(() => {
+        if (localDraft) {
+            applyDraft(localDraft)
+            draftSource.value = 'local'
+        }
+    })
+}
+
+function applyDraft(draft: AddRequestDraft) {
     if (draft.recipeId) {
         let api = new ApiApi()
         api.apiRecipeRead({ id: draft.recipeId }).then(r => {
-            if (r.id) {
-                selectedRecipe.value = r
-            }
+            if (r.id) selectedRecipe.value = r
         }).catch(() => {
             if (draft.recipeName) {
                 selectedRecipe.value = { id: draft.recipeId, name: draft.recipeName } as Recipe
@@ -489,14 +720,59 @@ function restoreAddDraft() {
     }
 }
 
-function clearAddDraftLocal() {
+function applyServerDraft(draft: ServerDraft) {
+    if (draft.recipeId) {
+        let api = new ApiApi()
+        api.apiRecipeRead({ id: draft.recipeId }).then(r => {
+            if (r.id) selectedRecipe.value = r
+        }).catch(() => {
+            if (draft.recipeName) {
+                selectedRecipe.value = { id: draft.recipeId, name: draft.recipeName } as Recipe
+            }
+        })
+    }
+    if (draft.note) {
+        addRequestNote.value = draft.note
+    }
+}
+
+function resolveConflict() {
+    if (!conflictChoice.value) return
+    if (conflictChoice.value === 'local' && conflictLocalDraft.value) {
+        applyDraft(conflictLocalDraft.value)
+        draftSource.value = 'local'
+        saveServerAddDraft({
+            recipeId: conflictLocalDraft.value.recipeId,
+            recipeName: conflictLocalDraft.value.recipeName,
+            note: conflictLocalDraft.value.note,
+        })
+    } else if (conflictChoice.value === 'server' && conflictServerDraft.value) {
+        applyServerDraft(conflictServerDraft.value)
+        draftSource.value = 'server'
+        if (editingObj.value?.id) {
+            saveAddDraft(editingObj.value.id, {
+                recipeId: conflictServerDraft.value.recipeId,
+                recipeName: conflictServerDraft.value.recipeName,
+                note: conflictServerDraft.value.note,
+            })
+        }
+    }
+    conflictDialogVisible.value = false
+    conflictLocalDraft.value = null
+    conflictServerDraft.value = null
+    conflictChoice.value = null
+}
+
+function clearAddDraftAll() {
     clearAddDraft(editingObj.value?.id)
+    deleteServerAddDraft()
     if (draftSaveTimer) {
         clearTimeout(draftSaveTimer)
         draftSaveTimer = null
     }
     selectedRecipe.value = {} as Recipe
     addRequestNote.value = ''
+    draftSource.value = null
 }
 
 function formatDraftTime(isoString: string): string {
@@ -601,7 +877,7 @@ function submitAddRequest() {
     }).then(() => {
         selectedRecipe.value = {} as Recipe
         addRequestNote.value = ''
-        clearAddDraftLocal()
+        clearAddDraftAll()
         useMessageStore().addPreparedMessage(PreparedMessage.CREATE_SUCCESS)
         loadChangeRequests({page: 1, itemsPerPage: 10, sortBy: [], groupBy: [], search: ''})
     }).catch(err => {
@@ -724,13 +1000,39 @@ function refreshEditingObj() {
 function openResubmitDialog(item: ChangeRequestItem) {
     resubmittingItem.value = item
     resubmitNote.value = item.note || ''
-    const draft = loadResubmitDraft(item.id)
-    if (draft && draft.note !== item.note) {
-        resubmitNote.value = draft.note
-        hasResubmitDraft.value = true
-    } else {
-        hasResubmitDraft.value = false
-    }
+
+    const localDraft = loadResubmitDraft(item.id)
+
+    fetch(`/api/change-request-draft/?book=${editingObj.value!.id}&change_request=${item.id}`, {
+        credentials: 'same-origin',
+    }).then(r => r.ok ? r.json() : Promise.reject(r)).then(data => {
+        const results = (data.results || []).map(mapServerDraft)
+        const serverDraft: ServerDraft | null = results.length > 0 ? results[0] : null
+
+        if (serverDraft && serverDraft.note !== item.note) {
+            if (localDraft && localDraft.note !== serverDraft.note && localDraft.note !== item.note) {
+                const localTime = new Date(localDraft.savedAt).getTime()
+                const serverTime = new Date(serverDraft.updatedAt).getTime()
+                resubmitNote.value = serverTime > localTime ? serverDraft.note : localDraft.note
+            } else {
+                resubmitNote.value = serverDraft.note
+            }
+            hasResubmitDraft.value = true
+        } else if (localDraft && localDraft.note !== item.note) {
+            resubmitNote.value = localDraft.note
+            hasResubmitDraft.value = true
+        } else {
+            hasResubmitDraft.value = false
+        }
+    }).catch(() => {
+        if (localDraft && localDraft.note !== item.note) {
+            resubmitNote.value = localDraft.note
+            hasResubmitDraft.value = true
+        } else {
+            hasResubmitDraft.value = false
+        }
+    })
+
     resubmitDialogVisible.value = true
 }
 
@@ -757,6 +1059,7 @@ function confirmResubmit() {
         resubmitDialogVisible.value = false
         if (resubmittingItem.value) {
             clearResubmitDraft(resubmittingItem.value.id)
+            deleteServerResubmitDraft(resubmittingItem.value.id)
         }
         resubmittingItem.value = null
         resubmitNote.value = ''
@@ -831,5 +1134,7 @@ function loadChangeRequests(options: VDataTableUpdateOptions) {
 </script>
 
 <style scoped>
-
+.border-primary {
+    border: 2px solid rgb(var(--v-theme-primary)) !important;
+}
 </style>

@@ -1016,6 +1016,12 @@
   "DraftSavedAt": "Draft saved {time}",
   "ClearDraft": "Clear draft",
   "RestoredFromDraft": "Restored from local draft",
+  "DraftSyncedAt": "Draft synced {time}",
+  "DraftConflictTitle": "Draft Conflict Detected",
+  "DraftConflictDesc": "Your local draft and server draft differ. Choose which one to keep:",
+  "DraftLocal": "Local Draft",
+  "DraftServer": "Server Draft",
+  "Apply": "Apply",
   "JustNow": "just now",
   "MinutesAgo": "{count} min ago",
   "HoursAgo": "{count} hours ago"

@@ -89,7 +89,7 @@ from cookbook.helper.shopping_helper import RecipeShoppingEditor
 from cookbook.models import (Automation, BookmarkletImport, ConnectorConfig, CookLog, CustomFilter, ExportLog, Food,
                              FoodInheritField, FoodProperty, ImportLog, Ingredient,
                              InviteLink, Keyword, MealPlan, MealType, Property, PropertyType, Recipe, RecipeBook,
-                             RecipeBookEntry, RecipeBookEntryChangeRequest, ShareLink, ShoppingListEntry,
+                             RecipeBookEntry, RecipeBookEntryChangeRequest, ChangeRequestDraft, ShareLink, ShoppingListEntry,
                              ShoppingListRecipe, Space, Step, Storage, Supermarket, SupermarketCategory,
                              SupermarketCategoryRelation, Sync, SyncLog, Unit, UnitConversion,
                              UserFile, UserPreference, UserSpace, ViewLog, RecipeImport, SearchPreference, SearchFields, AiLog, AiProvider, ShoppingList,
@@ -108,6 +108,7 @@ from cookbook.serializer import (AccessTokenSerializer, AutomationSerializer, Au
                                  PropertySerializer, PropertyTypeSerializer,
                                  RecipeBookEntrySerializer, RecipeBookSerializer, RecipeExportSerializer,
                                  RecipeBookEntryChangeRequestSerializer, RecipeBookChangeRequestReviewSerializer, RecipeBookChangeRequestResubmitSerializer,
+                                 ChangeRequestDraftSerializer,
                                  RecipeFlatSerializer, RecipeFromSourceSerializer, RecipeImageSerializer,
                                  RecipeOverviewSerializer, RecipeSerializer, RecipeShoppingUpdateSerializer,
                                  RecipeSimpleSerializer, ShoppingListEntryBulkSerializer,
@@ -1658,6 +1659,27 @@ class RecipeBookEntryChangeRequestViewSet(LoggingMixin, viewsets.ModelViewSet):
             RecipeBookEntryChangeRequestSerializer(new_request, context={'request': request}).data,
             status=status.HTTP_201_CREATED
         )
+
+
+class ChangeRequestDraftViewSet(LoggingMixin, viewsets.ModelViewSet):
+    queryset = ChangeRequestDraft.objects
+    serializer_class = ChangeRequestDraftSerializer
+    permission_classes = [CustomIsOwner & CustomTokenHasReadWriteScope]
+    pagination_class = DefaultPagination
+    http_method_names = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options']
+
+    def get_queryset(self):
+        return super().get_queryset().filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        space = self.request.space
+        serializer.save(user=self.request.user, space=space)
+
+    def perform_update(self, serializer):
+        serializer.save()
+
+    def get_owner(self, obj):
+        return obj.user
 
 
 class CalendarRenderer(BaseRenderer):

@@ -1330,6 +1330,47 @@ class MealType(models.Model, PermissionModelMixin):
         ordering = ('name',)
 
 
+class ChangeRequestDraft(ExportModelOperationsMixin('change_request_draft'), models.Model):
+    DRAFT_TYPE_ADD = 'ADD'
+    DRAFT_TYPE_RESUBMIT = 'RESUBMIT'
+    DRAFT_TYPE_CHOICES = (
+        (DRAFT_TYPE_ADD, _('Add Request')),
+        (DRAFT_TYPE_RESUBMIT, _('Resubmit Request')),
+    )
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='change_request_drafts')
+    book = models.ForeignKey(RecipeBook, on_delete=models.CASCADE, related_name='change_request_drafts')
+    change_request = models.ForeignKey(
+        RecipeBookEntryChangeRequest, on_delete=models.CASCADE,
+        null=True, blank=True, related_name='drafts'
+    )
+    draft_type = models.CharField(max_length=16, choices=DRAFT_TYPE_CHOICES, default=DRAFT_TYPE_ADD)
+    recipe_id = models.IntegerField(null=True, blank=True)
+    recipe_name = models.CharField(max_length=256, blank=True, default='')
+    note = models.TextField(blank=True, default='')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    space = models.ForeignKey(Space, on_delete=models.CASCADE)
+    objects = ScopedManager(space='space')
+
+    def __str__(self):
+        return f'Draft by {self.user} for book {self.book_id} ({self.draft_type})'
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'book', 'draft_type'],
+                condition=models.Q(change_request__isnull=True),
+                name='unique_draft_per_user_book_type',
+            ),
+            models.UniqueConstraint(
+                fields=['user', 'change_request'],
+                condition=models.Q(change_request__isnull=False),
+                name='unique_draft_per_user_change_request',
+            ),
+        ]
+
+
 class MealPlan(ExportModelOperationsMixin('meal_plan'), models.Model, PermissionModelMixin):
     recipe = models.ForeignKey(Recipe, on_delete=models.CASCADE, blank=True, null=True)
     servings = models.DecimalField(default=1, max_digits=8, decimal_places=4)
