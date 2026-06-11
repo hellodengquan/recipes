@@ -53,6 +53,7 @@ for space_config in DEMO_SPACES:
 
 
 def _get_space_counts(space):
+    from cookbook.models import Ingredient, Step
     with scopes_disabled():
         return {
             'users': UserSpace.objects.filter(space=space).count(),
@@ -63,6 +64,8 @@ def _get_space_counts(space):
             'recipes': Recipe.objects.filter(space=space).count(),
             'recipe_books': RecipeBook.objects.filter(space=space).count(),
             'recipe_book_entries': RecipeBookEntry.objects.filter(book__space=space).count(),
+            'steps': Step.objects.filter(space=space).count(),
+            'ingredients': Ingredient.objects.filter(space=space).count(),
         }
 
 
@@ -179,11 +182,15 @@ class TestSeedDemoDataFirstRun:
 
                 for recipe_config in space_config['recipes']:
                     recipe = Recipe.objects.get(name=recipe_config['name'], space=space)
-                    expected_keywords = recipe_config['keywords']
+                    expected_keywords = set(recipe_config['keywords'])
+                    actual_keywords = set(
+                        recipe.keywords.all().values_list('name', flat=True)
+                    )
 
-                    assert recipe.keywords.count() == len(expected_keywords)
-                    for kw_name in expected_keywords:
-                        assert recipe.keywords.filter(name=kw_name, space=space).exists()
+                    assert actual_keywords == expected_keywords, (
+                        f"Recipe '{recipe.name}' keywords mismatch: "
+                        f"expected {sorted(expected_keywords)}, got {sorted(actual_keywords)}"
+                    )
 
     def test_recipe_steps_and_ingredients(self):
         call_command('seed_demo_data')
