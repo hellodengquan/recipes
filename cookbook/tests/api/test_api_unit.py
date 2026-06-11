@@ -1,12 +1,16 @@
 import json
 import pytest
 import uuid
+from decimal import Decimal
 
 from django.contrib import auth
+from django.core.cache import caches
 from django.urls import reverse
 from django_scopes import scopes_disabled
 
-from cookbook.models import Food, Ingredient, ShoppingListEntry, Unit
+from cookbook.helper.cache_helper import CacheHelper
+from cookbook.helper.unit_conversion_helper import UnitConversionHelper
+from cookbook.models import Food, Ingredient, ShoppingListEntry, Unit, UnitConversion
 
 LIST_URL = 'api:unit-list'
 DETAIL_URL = 'api:unit-detail'
@@ -247,3 +251,189 @@ def test_merge(
     # run diagnostic to find problems - none should be found
     with scopes_disabled():
         assert Food.find_problems() == ([], [], [], [], [])
+
+
+@pytest.fixture()
+def unit_gram(space_1):
+    return Unit.objects.get_or_create(name='gram', base_unit='g', space=space_1)[0]
+
+
+@pytest.fixture()
+def unit_kg(space_1):
+    return Unit.objects.get_or_create(name='kilogram', base_unit='kg', space=space_1)[0]
+
+
+@pytest.fixture()
+def unit_pcs(space_1):
+    return Unit.objects.get_or_create(name='pieces', base_unit='', space=space_1)[0]
+
+
+@pytest.fixture()
+def unit_custom_1(space_1):
+    return Unit.objects.get_or_create(name='custom_1', base_unit='', space=space_1)[0]
+
+
+@pytest.fixture()
+def unit_custom_2(space_1):
+    return Unit.objects.get_or_create(name='custom_2', base_unit='', space=space_1)[0]
+
+
+def test_merge_with_base_unit_conversion(u1_s1, space_1, unit_gram, unit_kg):
+    with scopes_disabled():
+        u1_s1_user = auth.get_user(u1_s1)
+        food = Food.objects.create(name='Test Food', space=space_1)
+        ingredient = Ingredient.objects.create(
+            food=food,
+            unit=unit_gram,
+            amount=Decimal('1000'),
+            space=space_1,
+        )
+        shopping_entry = ShoppingListEntry.objects.create(
+            food=food,
+            unit=unit_gram,
+            amount=Decimal('500'),
+            created_by=u1_s1_user,
+            space=space_1,
+        )
+
+        UnitConversionHelper._base_units_cache.pop(space_1.id, None)
+        caches['default'].delete(CacheHelper(space_1).BASE_UNITS_CACHE_KEY)
+
+    url = reverse(MERGE_URL, args=[unit_gram.id, unit_kg.id])
+    r = u1_s1.put(url)
+    assert r.status_code == 200
+
+    with scopes_disabled():
+        ingredient.refresh_from_db()
+        shopping_entry.refresh_from_db()
+
+        assert ingredient.unit == unit_kg
+        assert abs(ingredient.amount - Decimal('1')) < Decimal('0.0001')
+
+        assert shopping_entry.unit == unit_kg
+        assert abs(shopping_entry.amount - Decimal('0.5')) < Decimal('0.0001')
+
+        assert Unit.objects.filter(pk=unit_gram.id).count() == 0
+
+
+def test_merge_with_custom_unit_conversion(u1_s1, space_1, unit_custom_1, unit_custom_2):
+    with scopes_disabled():
+        u1_s1_user = auth.get_user(u1_s1)
+        UnitConversion.objects.create(
+            base_amount=Decimal('1'),
+            base_unit=unit_custom_1,
+            converted_amount=Decimal('1000'),
+            converted_unit=unit_custom_2,
+            space=space_1,
+            created_by=u1_s1_user,
+        )
+
+        food = Food.objects.create(name='Test Food 2', space=space_1)
+        ingredient = Ingredient.objects.create(
+            food=food,
+            unit=unit_custom_1,
+            amount=Decimal('5'),
+            space=space_1,
+        )
+        shopping_entry = ShoppingListEntry.objects.create(
+            food=food,
+            unit=unit_custom_1,
+            amount=Decimal('2.5'),
+            created_by=u1_s1_user,
+            space=space_1,
+        )
+
+    url = reverse(MERGE_URL, args=[unit_custom_1.id, unit_custom_2.id])
+    r = u1_s1.put(url)
+    assert r.status_code == 200
+
+    with scopes_disabled():
+        ingredient.refresh_from_db()
+        shopping_entry.refresh_from_db()
+
+        assert ingredient.unit == unit_custom_2
+        assert abs(ingredient.amount - Decimal('5000')) < Decimal('0.0001')
+
+        assert shopping_entry.unit == unit_custom_2
+        assert abs(shopping_entry.amount - Decimal('2500')) < Decimal('0.0001')
+
+
+def test_merge_without_conversion(u1_s1, space_1, unit_pcs):
+    with scopes_disabled():
+        u1_s1_user = auth.get_user(u1_s1)
+        unit_pcs_2 = Unit.objects.create(name='pieces_2', base_unit='', space=space_1)
+        food = Food.objects.create(name='Test Food 3', space=space_1)
+        ingredient = Ingredient.objects.create(
+            food=food,
+            unit=unit_pcs,
+            amount=Decimal('10'),
+            space=space_1,
+        )
+        shopping_entry = ShoppingListEntry.objects.create(
+            food=food,
+            unit=unit_pcs,
+            amount=Decimal('5'),
+            created_by=u1_s1_user,
+            space=space_1,
+        )
+
+    url = reverse(MERGE_URL, args=[unit_pcs.id, unit_pcs_2.id])
+    r = u1_s1.put(url)
+    assert r.status_code == 200
+
+    with scopes_disabled():
+        ingredient.refresh_from_db()
+        shopping_entry.refresh_from_db()
+
+        assert ingredient.unit == unit_pcs_2
+        assert ingredient.amount == Decimal('10')
+
+        assert shopping_entry.unit == unit_pcs_2
+        assert shopping_entry.amount == Decimal('5')
+
+
+def test_merge_clears_cache(u1_s1, space_1, unit_gram, unit_kg):
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        caches['default'].set(cache_helper.BASE_UNITS_CACHE_KEY, ['test_data'], 60)
+        UnitConversionHelper._base_units_cache[space_1.id] = ['test_data']
+
+        assert caches['default'].get(cache_helper.BASE_UNITS_CACHE_KEY) is not None
+        assert space_1.id in UnitConversionHelper._base_units_cache
+
+    url = reverse(MERGE_URL, args=[unit_gram.id, unit_kg.id])
+    r = u1_s1.put(url)
+    assert r.status_code == 200
+
+    with scopes_disabled():
+        assert caches['default'].get(cache_helper.BASE_UNITS_CACHE_KEY) is None
+        assert space_1.id not in UnitConversionHelper._base_units_cache
+
+
+def test_delete_clears_cache(u1_s1, space_1, unit_gram):
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        caches['default'].set(cache_helper.BASE_UNITS_CACHE_KEY, ['test_data'], 60)
+        UnitConversionHelper._base_units_cache[space_1.id] = ['test_data']
+
+        assert caches['default'].get(cache_helper.BASE_UNITS_CACHE_KEY) is not None
+        assert space_1.id in UnitConversionHelper._base_units_cache
+
+    url = reverse(DETAIL_URL, args=[unit_gram.id])
+    r = u1_s1.delete(url)
+    assert r.status_code == 204
+
+    with scopes_disabled():
+        assert caches['default'].get(cache_helper.BASE_UNITS_CACHE_KEY) is None
+        assert space_1.id not in UnitConversionHelper._base_units_cache
+
+
+def test_convert_from_to_precision():
+    result = UnitConversionHelper.convert_from_to('g', 'kg', 1234)
+    assert abs(result - Decimal('1.234')) < Decimal('0.0001')
+
+    result = UnitConversionHelper.convert_from_to('kg', 'g', 1)
+    assert result == Decimal('1000')
+
+    result = UnitConversionHelper.convert_from_to('kg', 'pound', 2)
+    assert abs(result - Decimal('4.40924')) < Decimal('0.00001')

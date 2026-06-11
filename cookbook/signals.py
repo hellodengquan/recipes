@@ -123,7 +123,13 @@ def update_food_inheritance(sender, instance=None, created=False, **kwargs):
 def clear_unit_cache(sender, instance=None, created=False, **kwargs):
     if instance:
         caches['default'].delete(CacheHelper(instance.space).BASE_UNITS_CACHE_KEY)
-        # Also clear class-level cache used by UnitConversionHelper
+        UnitConversionHelper._base_units_cache.pop(instance.space.id, None)
+
+
+@receiver(post_delete, sender=Unit)
+def clear_unit_cache_on_delete(sender, instance=None, **kwargs):
+    if instance:
+        caches['default'].delete(CacheHelper(instance.space).BASE_UNITS_CACHE_KEY)
         UnitConversionHelper._base_units_cache.pop(instance.space.id, None)
 
 

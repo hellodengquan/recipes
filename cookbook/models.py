@@ -3,6 +3,7 @@ import pathlib
 import re
 import uuid
 from datetime import date, timedelta
+from decimal import Decimal
 
 import oauth2_provider.models
 from annoying.fields import AutoOneToOneField
@@ -10,6 +11,7 @@ from django.contrib import auth
 from django.contrib.auth.models import Group, User
 from django.contrib.postgres.indexes import GinIndex
 from django.contrib.postgres.search import SearchVectorField
+from django.core.cache import caches
 from django.core.files.uploadedfile import InMemoryUploadedFile, UploadedFile
 from django.core.validators import MinLengthValidator
 from django.db import IntegrityError, models
@@ -752,13 +754,72 @@ class Unit(ExportModelOperationsMixin('unit'), models.Model, PermissionModelMixi
     def merge_into(self, target):
         super().merge_into(target)
 
-        Ingredient.objects.filter(unit=self).update(unit=target)
-        ShoppingListEntry.objects.filter(unit=self).update(unit=target)
+        conversion_factor = self._get_conversion_factor(target)
+
+        with scopes_disabled():
+            if conversion_factor != 1:
+                for ingredient in Ingredient.objects.filter(unit=self):
+                    ingredient.amount = ingredient.amount * conversion_factor
+                    ingredient.unit = target
+                    ingredient.save()
+
+                for entry in ShoppingListEntry.objects.filter(unit=self):
+                    entry.amount = entry.amount * conversion_factor
+                    entry.unit = target
+                    entry.save()
+            else:
+                Ingredient.objects.filter(unit=self).update(unit=target)
+                ShoppingListEntry.objects.filter(unit=self).update(unit=target)
+
         Food.objects.filter(properties_food_unit=self).update(properties_food_unit=target)
         Food.objects.filter(preferred_unit=self).update(preferred_unit=target)
         Food.objects.filter(preferred_shopping_unit=self).update(preferred_shopping_unit=target)
+
+        self._clear_unit_caches()
+        target._clear_unit_caches()
+
         self.delete()
         return target
+
+    def _get_conversion_factor(self, target):
+        from cookbook.helper.unit_conversion_helper import UnitConversionHelper, ConversionException
+
+        if self == target:
+            return Decimal(1)
+
+        try:
+            uc = UnitConversion.objects.filter(
+                Q(base_unit=self, converted_unit=target) |
+                Q(base_unit=target, converted_unit=self),
+                space=self.space,
+                food__isnull=True
+            ).first()
+
+            if uc:
+                if uc.base_unit == self and uc.converted_unit == target:
+                    return Decimal(uc.converted_amount) / Decimal(uc.base_amount)
+                else:
+                    return Decimal(uc.base_amount) / Decimal(uc.converted_amount)
+        except Exception:
+            pass
+
+        if not self.base_unit and not target.base_unit:
+            return Decimal(1)
+
+        try:
+            from_unit = self.base_unit or self.name
+            to_unit = target.base_unit or target.name
+            return UnitConversionHelper.convert_from_to(from_unit, to_unit, 1)
+        except ConversionException:
+            return Decimal(1)
+
+    def _clear_unit_caches(self):
+        from cookbook.helper.cache_helper import CacheHelper
+        from cookbook.helper.unit_conversion_helper import UnitConversionHelper
+
+        cache_helper = CacheHelper(self.space)
+        caches['default'].delete(cache_helper.BASE_UNITS_CACHE_KEY)
+        UnitConversionHelper._base_units_cache.pop(self.space.id, None)
 
     def __str__(self):
         return self.name

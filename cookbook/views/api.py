@@ -387,8 +387,9 @@ class MergeMixin(ViewSetMixin):
                     UnitConversion.objects.filter(food=source).delete()
 
                 if isinstance(source, Unit):
-                    UnitConversion.objects.filter(base_unit=source).delete()
-                    UnitConversion.objects.filter(converted_unit=source).delete()
+                    source.merge_into(target)
+                    content = {'msg': _(f'{source.name} was merged successfully with {target.name}')}
+                    return Response(content, status=status.HTTP_200_OK)
 
                 for link in [field for field in source._meta.get_fields() if issubclass(type(field), ForeignObjectRel)]:
                     linkManager = getattr(source, link.get_accessor_name())

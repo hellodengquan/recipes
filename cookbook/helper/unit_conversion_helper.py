@@ -67,7 +67,7 @@ class UnitConversionHelper:
         if not system:
             raise ConversionException('Trying to convert units not existing or not in one unit system (weight/volume)')
 
-        return Decimal(amount / Decimal(CONVERSION_TABLE[system][from_unit] / CONVERSION_TABLE[system][to_unit]))
+        return Decimal(amount) * Decimal(CONVERSION_TABLE[system][to_unit]) / Decimal(CONVERSION_TABLE[system][from_unit])
 
     def base_conversions(self, ingredient_list):
         """
@@ -153,7 +153,7 @@ class UnitConversionHelper:
         """
         if (uc.food_id is None or (food and uc.food_id == food.id)) and uc.converted_amount > 0 and uc.base_amount > 0:
             if unit.id == uc.base_unit_id:
-                return Ingredient(amount=amount * (uc.converted_amount / uc.base_amount), unit=uc.converted_unit, food=food, space=self.space)
+                return Ingredient(amount=Decimal(amount) * Decimal(uc.converted_amount) / Decimal(uc.base_amount), unit=uc.converted_unit, food=food, space=self.space)
             else:
-                return Ingredient(amount=amount * (uc.base_amount / uc.converted_amount), unit=uc.base_unit, food=food, space=self.space)
+                return Ingredient(amount=Decimal(amount) * Decimal(uc.base_amount) / Decimal(uc.converted_amount), unit=uc.base_unit, food=food, space=self.space)
         return None
