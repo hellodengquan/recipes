@@ -14,8 +14,6 @@ from recipes.settings import DEBUG
 class CopyMeThat(Integration):
 
     def import_file_name_filter(self, zip_info_object):
-        if DEBUG:
-            print("testing", zip_info_object.filename, zip_info_object.filename == 'recipes.html')
         return zip_info_object.filename == 'recipes.html'
 
     def get_recipe_from_file(self, file):
@@ -120,7 +118,7 @@ class CopyMeThat(Integration):
                     import_zip = self.get_zip_file(f['file'])
                     self.import_recipe_image(recipe, BytesIO(self.safe_read(import_zip, file.find("img", class_="recipeImage").get("src"))), filetype='.jpeg')
         except Exception as e:
-            print(recipe.name, ': failed to import image ', str(e))
+            self._log_warning(f'failed to import image: {str(e)}', context=recipe.name)
 
         recipe.save()
         return recipe

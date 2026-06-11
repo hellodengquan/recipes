@@ -126,7 +126,7 @@ class CookBookApp(Integration):
                 response = safe_request('GET', url)
                 self.import_recipe_image(recipe, BytesIO(response.content))
             except Exception as e:
-                print(f'Failed to import image for {recipe.name}', str(e))
+                self._log_warning(f'failed to import image: {str(e)}', context=recipe.name)
 
         recipe.save()
         return recipe

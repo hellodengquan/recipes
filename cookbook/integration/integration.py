@@ -263,6 +263,45 @@ class Integration:
         if persist:
             self._ctx.import_log.save()
 
+    def _log_warning(self, message: str, context: Optional[str] = None, persist: bool = False) -> None:
+        prefix = 'WARN'
+        if context:
+            msg = f'{prefix} [{context}] {message}\n'
+        else:
+            msg = f'{prefix} {message}\n'
+        self._append_log(msg)
+        if persist:
+            self._ctx.import_log.save()
+        if DEBUG:
+            print(msg.strip())
+
+    def _log_error(self, message: str, exception: Optional[Exception] = None,
+                   recipe_name: Optional[str] = None, persist: bool = False) -> None:
+        if recipe_name:
+            ctx_msg = f'{ERROR_PREFIX} [{recipe_name}] {message}'
+        else:
+            ctx_msg = f'{ERROR_PREFIX} {message}'
+        if exception:
+            ctx_msg += f'\n  Exception: {str(exception)}'
+        self._append_log(ctx_msg + '\n')
+        if self._ctx and exception:
+            self._ctx.add_error(message=message, exception=exception, filename=recipe_name)
+        if persist:
+            self._ctx.import_log.save()
+        if DEBUG:
+            if exception:
+                traceback.print_exc()
+
+    def _import_recipe_safe(self, recipe_name: str, recipe: Recipe, image_file: Optional[Any] = None,
+                            filetype: str = '.jpeg') -> bool:
+        try:
+            if image_file:
+                self.import_recipe_image(recipe, image_file, filetype=filetype)
+            return True
+        except Exception as e:
+            self._log_warning(f'failed to import image: {str(e)}', context=recipe_name)
+            return False
+
     # --- Concrete file processors (strategy methods) --------------------------
 
     def _process_recipekeeper_zip(self, f: dict) -> None:

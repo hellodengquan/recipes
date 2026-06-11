@@ -38,8 +38,8 @@ class Rezeptsuitede(Integration):
                         instruction=prep.find('step').text.strip(), space=self.request.space, show_ingredients_table=self.request.user.userpreference.show_step_ingredients,
                     )
                     recipe.steps.add(step)
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_warning(f'failed to parse preparation step: {str(e)}', context=recipe.name)
 
         ingredient_parser = IngredientParser(self.request, True)
 
@@ -62,15 +62,15 @@ class Rezeptsuitede(Integration):
         try:
             k, created = Keyword.objects.get_or_create(name=recipe_xml.find('head').find('cat').text.strip(), space=self.request.space)
             recipe.keywords.add(k)
-        except Exception:
-            pass
+        except Exception as e:
+            self._log_warning(f'failed to import keyword/category: {str(e)}', context=recipe.name)
 
         recipe.save()
 
         try:
             self.import_recipe_image(recipe, BytesIO(base64.b64decode(recipe_xml.find('head').find('picbin').text)), filetype='.jpeg')
-        except BaseException:
-            pass
+        except Exception as e:
+            self._log_warning(f'failed to import image: {str(e)}', context=recipe.name)
 
         return recipe
 

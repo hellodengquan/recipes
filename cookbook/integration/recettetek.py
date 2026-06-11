@@ -15,7 +15,6 @@ from cookbook.models import Ingredient, Keyword, Recipe, Step
 class RecetteTek(Integration):
 
     def import_file_name_filter(self, zip_info_object):
-        print("testing", zip_info_object.filename)
         return re.match(r'^recipes_0.json$', zip_info_object.filename) or re.match(r'^recipes.json$', zip_info_object.filename)
 
     def split_recipe_file(self, file):
@@ -38,7 +37,7 @@ class RecetteTek(Integration):
             if file['description'] != '':
                 recipe.description = file['description'].strip()
         except Exception as e:
-            print(recipe.name, ': failed to parse recipe description ', str(e))
+            self._log_warning(f'failed to parse recipe description: {str(e)}', context=recipe.name)
 
         instructions = file['instructions']
         if not instructions:
@@ -52,7 +51,7 @@ class RecetteTek(Integration):
                 step.instruction += '\n\n' + _('Imported from') + ': ' + file['url']
                 step.save()
         except Exception as e:
-            print(recipe.name, ': failed to import source url ', str(e))
+            self._log_warning(f'failed to import source url: {str(e)}', context=recipe.name)
 
         try:
             # Process the ingredients. Assumes 1 ingredient per line.
@@ -66,7 +65,7 @@ class RecetteTek(Integration):
                         food=f, unit=u, amount=amount, note=note, original_text=ingredient, space=self.request.space,
                     ))
         except Exception as e:
-            print(recipe.name, ': failed to parse recipe ingredients ', str(e))
+            self._log_warning(f'failed to parse recipe ingredients: {str(e)}', context=recipe.name)
         recipe.steps.add(step)
 
         # Attempt to import prep/cooking times
@@ -78,25 +77,25 @@ class RecetteTek(Integration):
                         recipe.servings = int(item)
                         break
         except Exception as e:
-            print(recipe.name, ': failed to parse quantity ', str(e))
+            self._log_warning(f'failed to parse quantity: {str(e)}', context=recipe.name)
 
         try:
             if file['totalTime'] != '':
                 recipe.waiting_time = int(file['totalTime'])
         except Exception as e:
-            print(recipe.name, ': failed to parse total times ', str(e))
+            self._log_warning(f'failed to parse total times: {str(e)}', context=recipe.name)
 
         try:
             if file['preparationTime'] != '':
                 recipe.working_time = int(file['preparationTime'])
         except Exception as e:
-            print(recipe.name, ': failed to parse prep time ', str(e))
+            self._log_warning(f'failed to parse prep time: {str(e)}', context=recipe.name)
 
         try:
             if file['cookingTime'] != '':
                 recipe.waiting_time = int(file['cookingTime'])
         except Exception as e:
-            print(recipe.name, ': failed to parse cooking time ', str(e))
+            self._log_warning(f'failed to parse cooking time: {str(e)}', context=recipe.name)
 
         recipe.save()
 
@@ -108,7 +107,7 @@ class RecetteTek(Integration):
                     recipe.keywords.add(k)
             recipe.save()
         except Exception as e:
-            print(recipe.name, ': failed to parse keywords ', str(e))
+            self._log_warning(f'failed to parse keywords: {str(e)}', context=recipe.name)
 
         # TODO: Parse Nutritional Information
 
@@ -130,7 +129,7 @@ class RecetteTek(Integration):
                     else:
                         raise Exception("Original image failed to download.")
         except Exception as e:
-            print(recipe.name, ': failed to import image ', str(e))
+            self._log_warning(f'failed to import image: {str(e)}', context=recipe.name)
 
         return recipe
 

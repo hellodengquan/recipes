@@ -30,7 +30,7 @@ class RecipeSage(Integration):
                 recipe.working_time = parse_time(file['timePrep'])
                 recipe.waiting_time = parse_time(file['totalTime']) - parse_time(file['timePrep'])
         except Exception as e:
-            print('failed to parse time ', str(e))
+            self._log_warning(f'failed to parse time: {str(e)}', context=recipe.name)
 
         if 'isBasedOn' in file and file['isBasedOn']!="":
             recipe.source_url = file['isBasedOn'].strip()
@@ -77,7 +77,7 @@ class RecipeSage(Integration):
                 response = safe_request('GET', url)
                 self.import_recipe_image(recipe, BytesIO(response.content))
             except Exception as e:
-                print('failed to import image ', str(e))
+                self._log_warning(f'failed to import image: {str(e)}', context=recipe.name)
 
 
         if 'recipeCategory' in file and file['recipeCategory']!=[]:
@@ -85,7 +85,7 @@ class RecipeSage(Integration):
                 for k in file['recipeCategory']:
                     recipe.keywords.add(Keyword.objects.get_or_create(space=self.request.space, name=k)[0])
             except Exception as e:
-                print("Failed to import keywords", str(e))
+                self._log_warning(f'failed to import keywords: {str(e)}', context=recipe.name)
         return recipe
 
     def get_file_from_recipe(self, recipe):
@@ -136,4 +136,4 @@ class RecipeSage(Integration):
             else:
                 return data
         except Exception as e:
-            print("Failed to split file ", str(e))
+            raise e

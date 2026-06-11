@@ -198,7 +198,7 @@ class Gourmet(Integration):
                     self.import_recipe_image(recipe, image_bytes, filetype='.jpeg')
                     break
         except Exception as e:
-            print(recipe.name, ': failed to import image ', str(e))
+            self._log_warning(f'failed to import image: {str(e)}', context=recipe.name)
 
         recipe.save()
         return recipe

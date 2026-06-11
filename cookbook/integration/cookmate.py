@@ -70,7 +70,7 @@ class Cookmate(Integration):
                 response = safe_request('GET', url)
                 self.import_recipe_image(recipe, BytesIO(response.content))
             except Exception as e:
-                print('failed to import image ', str(e))
+                self._log_warning(f'failed to import image: {str(e)}', context=recipe.name)
 
         recipe.save()
 

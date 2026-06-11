@@ -30,7 +30,8 @@ class MealMaster(Integration):
         try:
             servings = re.findall('([0-9])+', servings_text)[0]
         except Exception as e:
-            print('failed parsing servings ', e)
+            servings = 1
+            self._log_warning(f'failed parsing servings: {str(e)}', context=title)
 
         recipe = Recipe.objects.create(name=title, servings=servings, created_by=self.request.user, internal=True, space=self.request.space)
 
