@@ -824,6 +824,7 @@ class PropertyTypeSerializer(OpenDataModelMixin, WritableNestedModelSerializer, 
 class PropertySerializer(UniqueFieldsMixin, WritableNestedModelSerializer):
     property_type = PropertyTypeSerializer()
     property_amount = CustomDecimalField(allow_null=True)
+    confidence_score = CustomDecimalField(required=False)
 
     def create(self, validated_data):
         validated_data['space'] = self.context['request'].space
@@ -831,7 +832,8 @@ class PropertySerializer(UniqueFieldsMixin, WritableNestedModelSerializer):
 
     class Meta:
         model = Property
-        fields = ('id', 'property_amount', 'property_type')
+        fields = ('id', 'property_amount', 'property_type', 'confidence_score', 'needs_review', 'data_source')
+        read_only_fields = ('needs_review',)
 
 
 class RecipeSimpleSerializer(WritableNestedModelSerializer):
@@ -1131,6 +1133,17 @@ class NutritionInformationSerializer(serializers.ModelSerializer):
     fats = CustomDecimalField()
     proteins = CustomDecimalField()
     calories = CustomDecimalField()
+    confidence_score = CustomDecimalField(read_only=True)
+    reviewed_by = UserSerializer(read_only=True)
+    user_permissions = serializers.SerializerMethodField('get_user_permissions')
+
+    @extend_schema_field(dict)
+    def get_user_permissions(self, obj):
+        try:
+            from cookbook.helper.permission_helper import get_nutrition_role_permissions
+            return get_nutrition_role_permissions(self.context['request'].user)
+        except Exception:
+            return {'role': 'guest', 'permissions': {}}
 
     def create(self, validated_data):
         validated_data['space'] = self.context['request'].space
@@ -1138,7 +1151,16 @@ class NutritionInformationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = NutritionInformation
-        fields = ('id', 'carbohydrates', 'fats', 'proteins', 'calories', 'source')
+        fields = (
+            'id', 'carbohydrates', 'fats', 'proteins', 'calories', 'source',
+            'confidence_score', 'needs_review', 'review_status', 'review_comment',
+            'reviewed_by', 'reviewed_at', 'missing_ingredients', 'low_confidence_ingredients',
+            'user_permissions',
+        )
+        read_only_fields = (
+            'confidence_score', 'reviewed_by', 'reviewed_at',
+            'missing_ingredients', 'low_confidence_ingredients', 'user_permissions',
+        )
 
 
 class RecipeBaseSerializer(WritableNestedModelSerializer):

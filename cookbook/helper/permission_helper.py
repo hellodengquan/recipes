@@ -579,3 +579,66 @@ def create_space_for_user(user, name=None):
         user_space.groups.add(Group.objects.filter(name='admin').get())
 
         return user_space
+
+
+class CustomNutritionReviewApprove(permissions.BasePermission):
+    message = _('You do not have permission to approve or reject nutrition data. Admin role is required.')
+
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser:
+            return True
+        return has_group_permission(request.user, ['admin'])
+
+    def has_object_permission(self, request, view, obj):
+        return self.has_permission(request, view)
+
+
+class CustomNutritionReview(permissions.BasePermission):
+    message = _('You do not have permission to perform nutrition review operations.')
+
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser:
+            return True
+        if request.method in SAFE_METHODS:
+            return has_group_permission(request.user, ['guest'])
+        return has_group_permission(request.user, ['user', 'admin'])
+
+    def has_object_permission(self, request, view, obj):
+        return self.has_permission(request, view)
+
+
+class CustomNutritionFlag(permissions.BasePermission):
+    message = _('You do not have permission to flag nutrition data for review.')
+
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser:
+            return True
+        return has_group_permission(request.user, ['user', 'admin'])
+
+    def has_object_permission(self, request, view, obj):
+        return self.has_permission(request, view)
+
+
+def get_nutrition_role_permissions(user, space=None):
+    if not user.is_authenticated:
+        role = 'guest'
+    elif user.is_superuser:
+        role = 'admin'
+    elif has_group_permission(user, ['admin']):
+        role = 'admin'
+    elif has_group_permission(user, ['user']):
+        role = 'user'
+    else:
+        role = 'guest'
+
+    from cookbook.helper.permission_config import PermissionConfig
+    return {
+        'role': role,
+        'permissions': PermissionConfig.NUTRITION_ROLE_MATRIX.get(role, {}),
+    }

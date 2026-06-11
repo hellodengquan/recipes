@@ -1038,7 +1038,11 @@ class Property(models.Model, PermissionModelMixin):
     property_amount = models.DecimalField(default=None, null=True, decimal_places=4, max_digits=32)
     property_type = models.ForeignKey(PropertyType, on_delete=models.PROTECT)
 
-    open_data_food_slug = models.CharField(max_length=128, null=True, blank=True, default=None)  # field to hold food id when importing properties from the open data project
+    open_data_food_slug = models.CharField(max_length=128, null=True, blank=True, default=None)
+
+    confidence_score = models.DecimalField(default=100, decimal_places=2, max_digits=5, help_text=_('Property value confidence score 0-100'))
+    needs_review = models.BooleanField(default=False, help_text=_('Flag indicating this property requires manual review'))
+    data_source = models.CharField(max_length=64, default='MANUAL', help_text=_('Source of this property data: MANUAL, FDC, OPEN_DATA, AI'))
 
     space = models.ForeignKey(Space, on_delete=models.CASCADE)
     objects = ScopedManager(space='space')
@@ -1064,6 +1068,23 @@ class FoodProperty(models.Model):
 
 
 class NutritionInformation(models.Model, PermissionModelMixin):
+    REVIEW_PENDING = 'PENDING'
+    REVIEW_APPROVED = 'APPROVED'
+    REVIEW_REJECTED = 'REJECTED'
+    REVIEW_AUTO_APPROVED = 'AUTO_APPROVED'
+
+    REVIEW_CHOICES = (
+        (REVIEW_PENDING, _('Pending Review')),
+        (REVIEW_APPROVED, _('Approved')),
+        (REVIEW_REJECTED, _('Rejected')),
+        (REVIEW_AUTO_APPROVED, _('Auto Approved')),
+    )
+
+    CONFIDENCE_VERY_HIGH = 90
+    CONFIDENCE_HIGH = 70
+    CONFIDENCE_MEDIUM = 40
+    CONFIDENCE_LOW = 20
+
     fats = models.DecimalField(default=0, decimal_places=16, max_digits=32)
     carbohydrates = models.DecimalField(
         default=0, decimal_places=16, max_digits=32
@@ -1072,11 +1093,50 @@ class NutritionInformation(models.Model, PermissionModelMixin):
     calories = models.DecimalField(default=0, decimal_places=16, max_digits=32)
     source = models.CharField(max_length=512, default="", null=True, blank=True)
 
+    confidence_score = models.DecimalField(default=100, decimal_places=2, max_digits=5, help_text=_('Nutrition estimation confidence score 0-100'))
+    needs_review = models.BooleanField(default=False, help_text=_('Flag indicating this nutrition data requires manual review'))
+    review_status = models.CharField(max_length=32, choices=REVIEW_CHOICES, default=REVIEW_AUTO_APPROVED, help_text=_('Current review status'))
+    review_comment = models.TextField(blank=True, null=True, help_text=_('Comment left during review'))
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='nutrition_reviewed_by')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    missing_ingredients = models.JSONField(default=list, blank=True, help_text=_('List of ingredients with missing nutrition data'))
+    low_confidence_ingredients = models.JSONField(default=list, blank=True, help_text=_('List of ingredients flagged for low confidence'))
+
     space = models.ForeignKey(Space, on_delete=models.CASCADE)
     objects = ScopedManager(space='space')
 
     def __str__(self):
         return f'Nutrition {self.pk}'
+
+    def mark_for_review(self, reason=None, confidence=None):
+        self.needs_review = True
+        self.review_status = self.REVIEW_PENDING
+        if confidence is not None:
+            self.confidence_score = confidence
+        if reason:
+            self.review_comment = reason
+        self.save()
+
+    def approve(self, user, comment=None):
+        self.needs_review = False
+        self.review_status = self.REVIEW_APPROVED
+        self.reviewed_by = user
+        from django.utils import timezone
+        self.reviewed_at = timezone.now()
+        if comment:
+            self.review_comment = comment
+        self.save()
+
+    def reject(self, user, comment=None):
+        self.needs_review = False
+        self.review_status = self.REVIEW_REJECTED
+        self.reviewed_by = user
+        from django.utils import timezone
+        self.reviewed_at = timezone.now()
+        if comment:
+            self.review_comment = comment
+        self.save()
 
 
 from cookbook.managers import RecipeQuerySet  # noqa: E402 — deferred to avoid circular import

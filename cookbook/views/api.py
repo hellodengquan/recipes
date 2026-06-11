@@ -82,19 +82,22 @@ from cookbook.helper.permission_helper import (CustomIsAdmin, CustomIsOwner, Cus
                                                above_space_limit,
                                                group_required, has_group_permission, is_space_owner,
                                                switch_user_active_space, CustomAiProviderPermission, IsCreateDRF, CustomIsOwnerDestroyOnly, CustomIsHousehold,
-                                               get_household_user_ids)
+                                               get_household_user_ids, CustomNutritionReviewApprove, CustomNutritionReview,
+                                               CustomNutritionFlag, get_nutrition_role_permissions)
 from cookbook.helper.recipe_search import RecipeSearch
 from cookbook.helper.recipe_url_import import clean_dict, get_from_youtube_scraper, get_images_from_soup
 from cookbook.helper.shopping_helper import RecipeShoppingEditor
 from cookbook.models import (Automation, BookmarkletImport, ConnectorConfig, CookLog, CustomFilter, ExportLog, Food,
                              FoodInheritField, FoodProperty, ImportLog, Ingredient,
-                             InviteLink, Keyword, MealPlan, MealType, Property, PropertyType, Recipe, RecipeBook,
+                             InviteLink, Keyword, MealPlan, MealType, NutritionInformation, Property, PropertyType, Recipe, RecipeBook,
                              RecipeBookEntry, ShareLink, ShoppingListEntry,
                              ShoppingListRecipe, Space, Step, Storage, Supermarket, SupermarketCategory,
                              SupermarketCategoryRelation, Sync, SyncLog, Unit, UnitConversion,
                              UserFile, UserPreference, UserSpace, ViewLog, RecipeImport, SearchPreference, SearchFields, AiLog, AiProvider, ShoppingList,
                              InventoryLocation, InventoryEntry, InventoryLog, Household
                              )
+from cookbook.helper.nutrition_review_helper import NutritionReviewHelper
+from cookbook.helper.property_helper import FoodPropertyHelper
 from cookbook.provider.dropbox import Dropbox
 from cookbook.provider.local import Local
 from cookbook.provider.nextcloud import Nextcloud
@@ -2119,6 +2122,75 @@ class RecipeViewSet(LoggingMixin, viewsets.ModelViewSet, DeleteRelationMixing):
 
         return Response(self.serializer_class(obj, many=False, context={'request': request}).data)
 
+    @extend_schema(
+        responses={200: inline_serializer('NutritionReviewResponse', fields={
+            'confidence_score': CharField(),
+            'needs_review': CharField(),
+            'review_status': CharField(),
+            'review_items': CharField(),
+            'missing_ingredients': CharField(),
+            'low_confidence_ingredients': CharField(),
+        })}
+    )
+    @decorators.action(detail=True, methods=['GET'], permission_classes=[CustomNutritionReview])
+    def nutrition_review(self, request, pk):
+        recipe = self.get_object()
+        if recipe.get_space() != request.space:
+            raise PermissionDenied(detail='You do not have the required permission to perform this action', code=403)
+
+        fph = FoodPropertyHelper(request.space)
+        computed = fph.calculate_recipe_properties(recipe, run_review=True)
+
+        return Response(computed.get('_review', {}), status=status.HTTP_200_OK)
+
+    @decorators.action(detail=True, methods=['POST'], permission_classes=[CustomNutritionFlag])
+    def nutrition_flag(self, request, pk):
+        recipe = self.get_object()
+        if recipe.get_space() != request.space:
+            raise PermissionDenied(detail='You do not have the required permission to perform this action', code=403)
+
+        reason = request.data.get('reason', None)
+        confidence = request.data.get('confidence_score', None)
+
+        if not recipe.nutrition:
+            recipe.nutrition = NutritionInformation.objects.create(space=request.space)
+            recipe.save()
+
+        recipe.nutrition.mark_for_review(reason=reason, confidence=confidence)
+
+        from cookbook.serializer import NutritionInformationSerializer
+        return Response(NutritionInformationSerializer(recipe.nutrition, context={'request': request}).data, status=status.HTTP_200_OK)
+
+    @decorators.action(detail=True, methods=['POST'], permission_classes=[CustomNutritionReviewApprove])
+    def nutrition_approve(self, request, pk):
+        recipe = self.get_object()
+        if recipe.get_space() != request.space:
+            raise PermissionDenied(detail='You do not have the required permission to perform this action', code=403)
+
+        if not recipe.nutrition:
+            raise ValidationError('Recipe has no nutrition information to approve.')
+
+        comment = request.data.get('comment', None)
+        recipe.nutrition.approve(request.user, comment=comment)
+
+        from cookbook.serializer import NutritionInformationSerializer
+        return Response(NutritionInformationSerializer(recipe.nutrition, context={'request': request}).data, status=status.HTTP_200_OK)
+
+    @decorators.action(detail=True, methods=['POST'], permission_classes=[CustomNutritionReviewApprove])
+    def nutrition_reject(self, request, pk):
+        recipe = self.get_object()
+        if recipe.get_space() != request.space:
+            raise PermissionDenied(detail='You do not have the required permission to perform this action', code=403)
+
+        if not recipe.nutrition:
+            raise ValidationError('Recipe has no nutrition information to reject.')
+
+        comment = request.data.get('comment', None)
+        recipe.nutrition.reject(request.user, comment=comment)
+
+        from cookbook.serializer import NutritionInformationSerializer
+        return Response(NutritionInformationSerializer(recipe.nutrition, context={'request': request}).data, status=status.HTTP_200_OK)
+
 
 @extend_schema_view(list=extend_schema(
     parameters=[OpenApiParameter(name='food_id', description='ID of food to filter for', type=int),
@@ -3405,3 +3477,39 @@ def meal_plans_to_ical(queryset, filename):
     response["Content-Disposition"] = f'inline; filename={filename}'
 
     return response
+
+
+class NutritionReviewSummaryView(APIView):
+    permission_classes = [CustomNutritionReview & CustomTokenHasReadWriteScope]
+
+    def get(self, request):
+        review_helper = NutritionReviewHelper(request.space)
+        summary = review_helper.get_review_summary()
+        role_info = get_nutrition_role_permissions(request.user, request.space)
+
+        from cookbook.helper.permission_config import PermissionConfig
+        return Response({
+            'summary': summary,
+            'role': role_info['role'],
+            'permissions': role_info['permissions'],
+            'role_matrix': PermissionConfig.NUTRITION_ROLE_MATRIX,
+        }, status=status.HTTP_200_OK)
+
+
+class NutritionReviewPendingView(APIView):
+    permission_classes = [CustomNutritionReview & CustomTokenHasReadWriteScope]
+
+    def get(self, request):
+        review_helper = NutritionReviewHelper(request.space)
+        role_info = get_nutrition_role_permissions(request.user, request.space)
+
+        qs = review_helper.get_pending_reviews()
+
+        if not role_info['permissions'].get('view_all_pending', False):
+            qs = qs.filter(recipe__created_by=request.user)
+
+        from cookbook.serializer import NutritionInformationSerializer
+        return Response({
+            'count': qs.count(),
+            'results': NutritionInformationSerializer(qs, many=True, context={'request': request}).data,
+        }, status=status.HTTP_200_OK)
