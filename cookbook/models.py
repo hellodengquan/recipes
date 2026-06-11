@@ -1244,6 +1244,65 @@ class RecipeBookEntry(ExportModelOperationsMixin('book_entry'), models.Model, Pe
         ]
 
 
+class RecipeBookEntryChangeRequest(ExportModelOperationsMixin('book_entry_change_request'), models.Model, PermissionModelMixin):
+    ACTION_ADD = 'ADD'
+    ACTION_REMOVE = 'REMOVE'
+    ACTION_CHOICES = (
+        (ACTION_ADD, _('Add Recipe')),
+        (ACTION_REMOVE, _('Remove Recipe')),
+    )
+
+    STATUS_PENDING = 'PENDING'
+    STATUS_APPROVED = 'APPROVED'
+    STATUS_REJECTED = 'REJECTED'
+    STATUS_WITHDRAWN = 'WITHDRAWN'
+    STATUS_CHOICES = (
+        (STATUS_PENDING, _('Pending')),
+        (STATUS_APPROVED, _('Approved')),
+        (STATUS_REJECTED, _('Rejected')),
+        (STATUS_WITHDRAWN, _('Withdrawn')),
+    )
+
+    book = models.ForeignKey(RecipeBook, on_delete=models.CASCADE, related_name='change_requests')
+    recipe = models.ForeignKey(Recipe, on_delete=models.CASCADE)
+    action = models.CharField(max_length=16, choices=ACTION_CHOICES, default=ACTION_ADD)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    note = models.TextField(blank=True, default='')
+
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='change_requests_created')
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='change_requests_reviewed')
+    review_note = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    objects = ScopedManager(space='book__space')
+
+    @staticmethod
+    def get_space_key():
+        return 'book', 'space'
+
+    def get_owner(self):
+        try:
+            return self.book.created_by
+        except AttributeError:
+            return None
+
+    def __str__(self):
+        return f'{self.get_action_display()} - {self.recipe.name} - {self.get_status_display()}'
+
+    class Meta:
+        ordering = ('-created_at',)
+        constraints = [
+            models.UniqueConstraint(
+                fields=['book', 'recipe', 'action'],
+                condition=models.Q(status='PENDING'),
+                name='unique_pending_change_request'
+            )
+        ]
+
+
 class MealType(models.Model, PermissionModelMixin):
     name = models.CharField(max_length=128)
     order = models.IntegerField(default=0)

@@ -35,7 +35,7 @@ from cookbook.helper.unit_conversion_helper import UnitConversionHelper
 from cookbook.models import (Automation, BookmarkletImport, Comment, CookLog, CustomFilter,
                              ExportLog, Food, FoodInheritField, ImportLog, Ingredient, InviteLink,
                              Keyword, MealPlan, MealType, NutritionInformation, Property,
-                             PropertyType, Recipe, RecipeBook, RecipeBookEntry, RecipeImport,
+                             PropertyType, Recipe, RecipeBook, RecipeBookEntry, RecipeBookEntryChangeRequest, RecipeImport,
                              ShareLink, ShoppingListEntry, ShoppingListRecipe, Space,
                              Step, Storage, Supermarket, SupermarketCategory,
                              SupermarketCategoryRelation, Sync, SyncLog, Unit, UnitConversion,
@@ -1333,6 +1333,11 @@ class RecipeBookSerializer(SpacedModelSerializer, WritableNestedModelSerializer)
     created_by = UserSerializer(read_only=True)
     shared = UserSerializer(many=True)
     filter = CustomFilterSerializer(allow_null=True, required=False)
+    pending_change_requests_count = serializers.SerializerMethodField()
+
+    @extend_schema_field(int)
+    def get_pending_change_requests_count(self, obj):
+        return obj.change_requests.filter(status=RecipeBookEntryChangeRequest.STATUS_PENDING).count()
 
     def create(self, validated_data):
         validated_data['created_by'] = self.context['request'].user
@@ -1340,11 +1345,56 @@ class RecipeBookSerializer(SpacedModelSerializer, WritableNestedModelSerializer)
 
     class Meta:
         model = RecipeBook
-        fields = ('id', 'name', 'description', 'shared', 'created_by', 'filter', 'order')
-        read_only_fields = ('created_by',)
+        fields = ('id', 'name', 'description', 'shared', 'created_by', 'filter', 'order', 'pending_change_requests_count')
+        read_only_fields = ('created_by', 'pending_change_requests_count')
 
 
 class RecipeBookEntrySerializer(serializers.ModelSerializer):
+    book_content = serializers.SerializerMethodField(method_name='get_book_content', read_only=True)
+    recipe_content = serializers.SerializerMethodField(method_name='get_recipe_content', read_only=True)
+    pending_remove_request = serializers.SerializerMethodField()
+
+    @extend_schema_field(RecipeBookSerializer)
+    def get_book_content(self, obj):
+        return RecipeBookSerializer(context={'request': self.context['request']}).to_representation(obj.book)
+
+    @extend_schema_field(RecipeOverviewSerializer)
+    def get_recipe_content(self, obj):
+        return RecipeOverviewSerializer(context={'request': self.context['request']}).to_representation(obj.recipe)
+
+    @extend_schema_field(bool)
+    def get_pending_remove_request(self, obj):
+        return RecipeBookEntryChangeRequest.objects.filter(
+            book=obj.book,
+            recipe=obj.recipe,
+            action=RecipeBookEntryChangeRequest.ACTION_REMOVE,
+            status=RecipeBookEntryChangeRequest.STATUS_PENDING
+        ).exists()
+
+    def create(self, validated_data):
+        book = validated_data['book']
+        recipe = validated_data['recipe']
+        user = self.context['request'].user
+        is_owner = book.get_owner() == user
+        is_shared = user in book.get_shared()
+
+        if not is_owner and not is_shared:
+            raise NotFound(detail=None, code=None)
+
+        if is_shared and not is_owner:
+            raise ValidationError(_('Collaborators cannot directly add recipes. Please submit a change request instead.'))
+
+        obj, created = RecipeBookEntry.objects.get_or_create(book=book, recipe=recipe)
+        return obj
+
+    class Meta:
+        model = RecipeBookEntry
+        fields = ('id', 'book', 'book_content', 'recipe', 'recipe_content', 'pending_remove_request')
+
+
+class RecipeBookEntryChangeRequestSerializer(serializers.ModelSerializer):
+    created_by = UserSerializer(read_only=True)
+    reviewed_by = UserSerializer(read_only=True)
     book_content = serializers.SerializerMethodField(method_name='get_book_content', read_only=True)
     recipe_content = serializers.SerializerMethodField(method_name='get_recipe_content', read_only=True)
 
@@ -1356,17 +1406,48 @@ class RecipeBookEntrySerializer(serializers.ModelSerializer):
     def get_recipe_content(self, obj):
         return RecipeOverviewSerializer(context={'request': self.context['request']}).to_representation(obj.recipe)
 
-    def create(self, validated_data):
-        book = validated_data['book']
-        recipe = validated_data['recipe']
-        if not book.get_owner() == self.context['request'].user and not self.context['request'].user in book.get_shared():
+    def validate(self, attrs):
+        user = self.context['request'].user
+        book = attrs.get('book')
+        recipe = attrs.get('recipe')
+        action = attrs.get('action')
+
+        if not book:
+            raise ValidationError(_('Book is required.'))
+
+        if not recipe:
+            raise ValidationError(_('Recipe is required.'))
+
+        is_owner = book.get_owner() == user
+        is_shared = user in book.get_shared()
+
+        if not is_owner and not is_shared:
             raise NotFound(detail=None, code=None)
-        obj, created = RecipeBookEntry.objects.get_or_create(book=book, recipe=recipe)
-        return obj
+
+        if action == RecipeBookEntryChangeRequest.ACTION_REMOVE:
+            if not RecipeBookEntry.objects.filter(book=book, recipe=recipe).exists():
+                raise ValidationError(_('Recipe is not in this book, cannot request removal.'))
+
+        if action == RecipeBookEntryChangeRequest.ACTION_ADD:
+            if RecipeBookEntry.objects.filter(book=book, recipe=recipe).exists():
+                raise ValidationError(_('Recipe is already in this book.'))
+
+        return attrs
+
+    def create(self, validated_data):
+        validated_data['created_by'] = self.context['request'].user
+        return super().create(validated_data)
 
     class Meta:
-        model = RecipeBookEntry
-        fields = ('id', 'book', 'book_content', 'recipe', 'recipe_content',)
+        model = RecipeBookEntryChangeRequest
+        fields = ('id', 'book', 'book_content', 'recipe', 'recipe_content', 'action',
+                  'status', 'note', 'created_by', 'reviewed_by', 'review_note',
+                  'created_at', 'updated_at', 'reviewed_at',)
+        read_only_fields = ('created_by', 'reviewed_by', 'status', 'created_at', 'updated_at', 'reviewed_at',)
+
+
+class RecipeBookChangeRequestReviewSerializer(serializers.Serializer):
+    review_note = serializers.CharField(required=False, allow_blank=True)
 
 
 class MealPlanSerializer(SpacedModelSerializer, WritableNestedModelSerializer):

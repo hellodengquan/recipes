@@ -89,7 +89,7 @@ from cookbook.helper.shopping_helper import RecipeShoppingEditor
 from cookbook.models import (Automation, BookmarkletImport, ConnectorConfig, CookLog, CustomFilter, ExportLog, Food,
                              FoodInheritField, FoodProperty, ImportLog, Ingredient,
                              InviteLink, Keyword, MealPlan, MealType, Property, PropertyType, Recipe, RecipeBook,
-                             RecipeBookEntry, ShareLink, ShoppingListEntry,
+                             RecipeBookEntry, RecipeBookEntryChangeRequest, ShareLink, ShoppingListEntry,
                              ShoppingListRecipe, Space, Step, Storage, Supermarket, SupermarketCategory,
                              SupermarketCategoryRelation, Sync, SyncLog, Unit, UnitConversion,
                              UserFile, UserPreference, UserSpace, ViewLog, RecipeImport, SearchPreference, SearchFields, AiLog, AiProvider, ShoppingList,
@@ -107,6 +107,7 @@ from cookbook.serializer import (AccessTokenSerializer, AutomationSerializer, Au
                                  InviteLinkSerializer, KeywordSerializer, MealPlanSerializer, MealTypeSerializer,
                                  PropertySerializer, PropertyTypeSerializer,
                                  RecipeBookEntrySerializer, RecipeBookSerializer, RecipeExportSerializer,
+                                 RecipeBookEntryChangeRequestSerializer, RecipeBookChangeRequestReviewSerializer,
                                  RecipeFlatSerializer, RecipeFromSourceSerializer, RecipeImageSerializer,
                                  RecipeOverviewSerializer, RecipeSerializer, RecipeShoppingUpdateSerializer,
                                  RecipeSimpleSerializer, ShoppingListEntryBulkSerializer,
@@ -1465,6 +1466,142 @@ class RecipeBookEntryViewSet(LoggingMixin, viewsets.ModelViewSet):
         if book_id is not None:
             queryset = queryset.filter(book__pk=book_id)
         return queryset
+
+
+@extend_schema_view(list=extend_schema(parameters=[
+    OpenApiParameter(name='book', description='id of book - only return change requests for that book', type=int),
+    OpenApiParameter(name='recipe', description='id of recipe - only return change requests for that recipe', type=int),
+    OpenApiParameter(name='status', description='filter by status (PENDING, APPROVED, REJECTED, WITHDRAWN)', type=str),
+    OpenApiParameter(name='action', description='filter by action (ADD, REMOVE)', type=str),
+]))
+class RecipeBookEntryChangeRequestViewSet(LoggingMixin, viewsets.ModelViewSet):
+    queryset = RecipeBookEntryChangeRequest.objects
+    serializer_class = RecipeBookEntryChangeRequestSerializer
+    permission_classes = [(CustomIsOwner | (CustomIsShared & IsReadOnlyDRF)) & CustomTokenHasReadWriteScope]
+    pagination_class = DefaultPagination
+
+    def get_queryset(self):
+        queryset = self.queryset.filter(
+            Q(book__created_by=self.request.user) | Q(book__shared=self.request.user)
+        ).filter(book__space=self.request.space).distinct()
+
+        book_id = self.request.query_params.get('book', None)
+        if book_id is not None:
+            queryset = queryset.filter(book__pk=book_id)
+
+        recipe_id = self.request.query_params.get('recipe', None)
+        if recipe_id is not None:
+            queryset = queryset.filter(recipe__pk=recipe_id)
+
+        status_filter = self.request.query_params.get('status', None)
+        if status_filter is not None:
+            queryset = queryset.filter(status=status_filter)
+
+        action_filter = self.request.query_params.get('action', None)
+        if action_filter is not None:
+            queryset = queryset.filter(action=action_filter)
+
+        return queryset
+
+    def perform_destroy(self, instance):
+        user = self.request.user
+        if instance.status != RecipeBookEntryChangeRequest.STATUS_PENDING:
+            raise PermissionDenied(_('Only pending change requests can be withdrawn.'))
+        if instance.created_by != user and instance.book.get_owner() != user:
+            raise PermissionDenied(_('You do not have permission to withdraw this change request.'))
+        instance.status = RecipeBookEntryChangeRequest.STATUS_WITHDRAWN
+        instance.reviewed_by = user
+        instance.reviewed_at = timezone.now()
+        instance.save()
+
+    @decorators.action(detail=True, methods=['post'], serializer_class=RecipeBookChangeRequestReviewSerializer)
+    def approve(self, request, pk=None):
+        change_request = self.get_object()
+        user = request.user
+
+        if change_request.status != RecipeBookEntryChangeRequest.STATUS_PENDING:
+            return Response(
+                {'detail': _('Only pending change requests can be approved.')},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if change_request.book.get_owner() != user:
+            raise PermissionDenied(_('Only the book owner can approve change requests.'))
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        review_note = serializer.validated_data.get('review_note', '')
+
+        if change_request.action == RecipeBookEntryChangeRequest.ACTION_ADD:
+            RecipeBookEntry.objects.get_or_create(
+                book=change_request.book,
+                recipe=change_request.recipe
+            )
+        elif change_request.action == RecipeBookEntryChangeRequest.ACTION_REMOVE:
+            RecipeBookEntry.objects.filter(
+                book=change_request.book,
+                recipe=change_request.recipe
+            ).delete()
+
+        change_request.status = RecipeBookEntryChangeRequest.STATUS_APPROVED
+        change_request.reviewed_by = user
+        change_request.review_note = review_note
+        change_request.reviewed_at = timezone.now()
+        change_request.save()
+
+        return Response(RecipeBookEntryChangeRequestSerializer(change_request, context={'request': request}).data)
+
+    @decorators.action(detail=True, methods=['post'], serializer_class=RecipeBookChangeRequestReviewSerializer)
+    def reject(self, request, pk=None):
+        change_request = self.get_object()
+        user = request.user
+
+        if change_request.status != RecipeBookEntryChangeRequest.STATUS_PENDING:
+            return Response(
+                {'detail': _('Only pending change requests can be rejected.')},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if change_request.book.get_owner() != user:
+            raise PermissionDenied(_('Only the book owner can reject change requests.'))
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        review_note = serializer.validated_data.get('review_note', '')
+
+        change_request.status = RecipeBookEntryChangeRequest.STATUS_REJECTED
+        change_request.reviewed_by = user
+        change_request.review_note = review_note
+        change_request.reviewed_at = timezone.now()
+        change_request.save()
+
+        return Response(RecipeBookEntryChangeRequestSerializer(change_request, context={'request': request}).data)
+
+    @decorators.action(detail=True, methods=['post'], serializer_class=RecipeBookChangeRequestReviewSerializer)
+    def withdraw(self, request, pk=None):
+        change_request = self.get_object()
+        user = request.user
+
+        if change_request.status != RecipeBookEntryChangeRequest.STATUS_PENDING:
+            return Response(
+                {'detail': _('Only pending change requests can be withdrawn.')},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if change_request.created_by != user:
+            raise PermissionDenied(_('Only the creator can withdraw their own change request.'))
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        review_note = serializer.validated_data.get('review_note', '')
+
+        change_request.status = RecipeBookEntryChangeRequest.STATUS_WITHDRAWN
+        change_request.reviewed_by = user
+        change_request.review_note = review_note
+        change_request.reviewed_at = timezone.now()
+        change_request.save()
+
+        return Response(RecipeBookEntryChangeRequestSerializer(change_request, context={'request': request}).data)
 
 
 class CalendarRenderer(BaseRenderer):

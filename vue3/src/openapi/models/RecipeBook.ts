@@ -74,6 +74,12 @@ export interface RecipeBook {
      * @memberof RecipeBook
      */
     order?: number;
+    /**
+     * 
+     * @type {number}
+     * @memberof RecipeBook
+     */
+    readonly pendingChangeRequestsCount?: number;
 }
 
 /**
@@ -103,6 +109,7 @@ export function RecipeBookFromJSONTyped(json: any, ignoreDiscriminator: boolean)
         'createdBy': UserFromJSON(json['created_by']),
         'filter': json['filter'] == null ? undefined : CustomFilterFromJSON(json['filter']),
         'order': json['order'] == null ? undefined : json['order'],
+        'pendingChangeRequestsCount': json['pending_change_requests_count'] == null ? undefined : json['pending_change_requests_count'],
     };
 }
 
@@ -118,6 +125,7 @@ export function RecipeBookToJSON(value?: Omit<RecipeBook, 'createdBy'> | null): 
         'shared': ((value['shared'] as Array<any>).map(UserToJSON)),
         'filter': CustomFilterToJSON(value['filter']),
         'order': value['order'],
+        'pending_change_requests_count': value['pendingChangeRequestsCount'],
     };
 }
 

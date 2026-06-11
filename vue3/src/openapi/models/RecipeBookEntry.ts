@@ -62,6 +62,12 @@ export interface RecipeBookEntry {
      * @memberof RecipeBookEntry
      */
     readonly recipeContent: RecipeOverview;
+    /**
+     * 
+     * @type {boolean}
+     * @memberof RecipeBookEntry
+     */
+    readonly pendingRemoveRequest?: boolean;
 }
 
 /**
@@ -90,6 +96,7 @@ export function RecipeBookEntryFromJSONTyped(json: any, ignoreDiscriminator: boo
         'bookContent': RecipeBookFromJSON(json['book_content']),
         'recipe': json['recipe'],
         'recipeContent': RecipeOverviewFromJSON(json['recipe_content']),
+        'pendingRemoveRequest': json['pending_remove_request'] == null ? undefined : json['pending_remove_request'],
     };
 }
 
@@ -102,6 +109,7 @@ export function RecipeBookEntryToJSON(value?: Omit<RecipeBookEntry, 'bookContent
         'id': value['id'],
         'book': value['book'],
         'recipe': value['recipe'],
+        'pending_remove_request': value['pendingRemoveRequest'],
     };
 }
 
