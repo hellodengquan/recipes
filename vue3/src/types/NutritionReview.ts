@@ -145,3 +145,26 @@ export function getConfidenceText(score: number | string): string {
     if (num >= 40) return 'confidence_medium'
     return 'confidence_low'
 }
+
+export enum ItemOperationStatus {
+    NONE = 'NONE',
+    APPROVED = 'APPROVED',
+    REJECTED = 'REJECTED',
+    FLAGGED = 'FLAGGED',
+    FAILED = 'FAILED',
+}
+
+export interface FailedItemRecord {
+    recipe_id: number
+    recipe_name?: string
+    error: string
+    action: 'approve' | 'reject' | 'flag'
+    timestamp: number
+}
+
+export interface BatchOperationResult {
+    action: 'approve' | 'reject' | 'flag'
+    success_count: number
+    failed_count: number
+    failed_items: FailedItemRecord[]
+}

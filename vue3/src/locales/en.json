@@ -1057,5 +1057,22 @@
   "NutritionReview_BatchRejectConfirm": "Are you sure you want to reject nutrition data for {count} selected recipes?",
   "NutritionReview_BatchFlagConfirm": "Are you sure you want to flag nutrition data for {count} selected recipes for review?",
   "NutritionReview_BatchSuccess": "Batch action completed: {success} succeeded, {failed} failed",
-  "NutritionReview_BatchFailed": "Batch action failed"
+  "NutritionReview_BatchFailed": "Batch action failed",
+  "NutritionReview_BatchFailedItems": "Failed Items Details",
+  "NutritionReview_BatchFailedItemsEmpty": "No failed items",
+  "NutritionReview_BatchFailedRecipe": "Recipe #{id}",
+  "NutritionReview_BatchFailedError": "Error: {error}",
+  "NutritionReview_BatchReselectFailed": "Reselect Failed Items",
+  "NutritionReview_BatchClearFailed": "Clear Failed Records",
+  "NutritionReview_Status": "Status",
+  "NutritionReview_StatusPending": "Pending Review",
+  "NutritionReview_StatusApproved": "Approved",
+  "NutritionReview_StatusRejected": "Rejected",
+  "NutritionReview_StatusAutoApproved": "Auto Approved",
+  "NutritionReview_StatusJustApproved": "Just Approved",
+  "NutritionReview_StatusJustRejected": "Just Rejected",
+  "NutritionReview_StatusJustFlagged": "Just Flagged",
+  "NutritionReview_StatusJustFailed": "Action Failed",
+  "NutritionReview_BatchSelectSingle": "Select This",
+  "NutritionReview_BatchRetryFailed": "Retry Failed Items"
 }

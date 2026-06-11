@@ -1060,5 +1060,22 @@
     "NutritionReview_BatchRejectConfirm": "您确定要拒绝选中的 {count} 个食谱的营养数据吗？",
     "NutritionReview_BatchFlagConfirm": "您确定要标记选中的 {count} 个食谱的营养数据需复核吗？",
     "NutritionReview_BatchSuccess": "批量操作成功：{success} 个成功，{failed} 个失败",
-    "NutritionReview_BatchFailed": "批量操作失败"
+    "NutritionReview_BatchFailed": "批量操作失败",
+    "NutritionReview_BatchFailedItems": "失败条目详情",
+    "NutritionReview_BatchFailedItemsEmpty": "没有失败的条目",
+    "NutritionReview_BatchFailedRecipe": "食谱 #{id}",
+    "NutritionReview_BatchFailedError": "错误信息：{error}",
+    "NutritionReview_BatchReselectFailed": "重新选择失败条目",
+    "NutritionReview_BatchClearFailed": "清除失败记录",
+    "NutritionReview_Status": "状态",
+    "NutritionReview_StatusPending": "待复核",
+    "NutritionReview_StatusApproved": "已批准",
+    "NutritionReview_StatusRejected": "已驳回",
+    "NutritionReview_StatusAutoApproved": "自动批准",
+    "NutritionReview_StatusJustApproved": "刚刚批准",
+    "NutritionReview_StatusJustRejected": "刚刚驳回",
+    "NutritionReview_StatusJustFlagged": "刚刚标记",
+    "NutritionReview_StatusJustFailed": "操作失败",
+    "NutritionReview_BatchSelectSingle": "选中此项",
+    "NutritionReview_BatchRetryFailed": "重试失败项"
 }
