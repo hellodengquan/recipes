@@ -742,3 +742,453 @@ def test_alias_chain_with_custom_conversion(space_1, u1_s1):
         assert abs(tsp_conv.amount - Decimal('2')) < Decimal('0.001')
         assert abs(ml_conv.amount - Decimal('9.8578')) < Decimal('0.01')
         assert abs(l_conv.amount - Decimal('0.0098578')) < Decimal('0.0001')
+
+
+def test_cyclic_alias_chain_three_units(space_1, u1_s1):
+    """
+    Three units forming a perfect cycle: A ↔ B ↔ C ↔ A.
+    Verifies that:
+    1. The conversion terminates (no infinite loop) - regression test for cycle protection
+    2. ALL units on the cycle are discovered
+    3. Each conversion has the correct numeric value based on BFS traversal
+    4. No duplicate entries appear
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_a = Unit.objects.create(name='unit_a', base_unit='', space=space_1)
+        unit_b = Unit.objects.create(name='unit_b', base_unit='', space=space_1)
+        unit_c = Unit.objects.create(name='unit_c', base_unit='', space=space_1)
+
+        food = Food.objects.create(name='Cycle Food', space=space_1)
+
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_a,
+            converted_amount=2, converted_unit=unit_b,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_b,
+            converted_amount=3, converted_unit=unit_c,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_c,
+            converted_amount=6, converted_unit=unit_a,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+
+        ingredient = Ingredient.objects.create(
+            food=food, unit=unit_a, amount=Decimal('2'), space=space_1,
+        )
+
+        conversions = uch.get_conversions(ingredient)
+        unit_names = [c.unit.name for c in conversions]
+
+        assert len(unit_names) == len(set(unit_names)), "Duplicate units found in conversion results"
+
+        assert 'unit_a' in unit_names, "Starting unit must be present"
+        assert 'unit_b' in unit_names, "unit_b should be reachable from A"
+        assert 'unit_c' in unit_names, "unit_c should be reachable from A (via B→C or C→A reverse)"
+
+        a_conv = next(c for c in conversions if c.unit.name == 'unit_a')
+        b_conv = next(c for c in conversions if c.unit.name == 'unit_b')
+        c_conv = next(c for c in conversions if c.unit.name == 'unit_c')
+
+        assert abs(a_conv.amount - Decimal('2')) < Decimal('0.0001'), "Original amount should be preserved"
+        assert abs(b_conv.amount - Decimal('4')) < Decimal('0.0001'), "2 A → B: 2 * 2/1 = 4"
+
+        c_expected_via_b = Decimal('4') * Decimal('3') / Decimal('1')
+        c_expected_via_ca = Decimal('2') * Decimal('1') / Decimal('6')
+        assert (abs(c_conv.amount - c_expected_via_b) < Decimal('0.0001') or
+                abs(c_conv.amount - c_expected_via_ca) < Decimal('0.0001')), \
+            f"C amount {c_conv.amount} should be either {c_expected_via_b} (via B) or {c_expected_via_ca} (via C→A reverse)"
+
+
+def test_cyclic_alias_chain_four_units(space_1, u1_s1):
+    """
+    Longer cycle: W → X → Y → Z → W with 4 units.
+    Tests that BFS correctly traverses longer cycles without looping.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_w = Unit.objects.create(name='W', base_unit='', space=space_1)
+        unit_x = Unit.objects.create(name='X', base_unit='', space=space_1)
+        unit_y = Unit.objects.create(name='Y', base_unit='', space=space_1)
+        unit_z = Unit.objects.create(name='Z', base_unit='', space=space_1)
+
+        food = Food.objects.create(name='Four-Cycle Food', space=space_1)
+
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_w,
+            converted_amount=10, converted_unit=unit_x,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_x,
+            converted_amount=10, converted_unit=unit_y,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_y,
+            converted_amount=10, converted_unit=unit_z,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_z,
+            converted_amount=1000, converted_unit=unit_w,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+
+        ingredient = Ingredient.objects.create(
+            food=food, unit=unit_w, amount=Decimal('1'), space=space_1,
+        )
+
+        conversions = uch.get_conversions(ingredient)
+        unit_names = {c.unit.name for c in conversions}
+
+        assert unit_names == {'W', 'X', 'Y', 'Z'}, f"Expected all 4 units, got {unit_names}"
+
+        w_conv = next(c for c in conversions if c.unit.name == 'W')
+        x_conv = next(c for c in conversions if c.unit.name == 'X')
+        y_conv = next(c for c in conversions if c.unit.name == 'Y')
+        z_conv = next(c for c in conversions if c.unit.name == 'Z')
+
+        assert abs(w_conv.amount - Decimal('1')) < Decimal('0.0001')
+
+        x_expected = Decimal('1') * Decimal('10') / Decimal('1')
+        assert abs(x_conv.amount - x_expected) < Decimal('0.0001'), "1 W → X: 1 * 10/1 = 10"
+
+        y_expected_via_x = x_expected * Decimal('10') / Decimal('1')
+        y_expected_via_zw = Decimal('1') * Decimal('1') / Decimal('1000') * Decimal('10') / Decimal('1') * Decimal('10') / Decimal('1')
+        assert (abs(y_conv.amount - y_expected_via_x) < Decimal('0.0001') or
+                abs(y_conv.amount - y_expected_via_zw) < Decimal('0.0001')), \
+            f"Y amount {y_conv.amount} should be reachable via some valid path"
+
+        z_expected_via_y = y_expected_via_x * Decimal('10') / Decimal('1')
+        z_expected_via_zw = Decimal('1') * Decimal('1') / Decimal('1000')
+        assert (abs(z_conv.amount - z_expected_via_y) < Decimal('0.0001') or
+                abs(z_conv.amount - z_expected_via_zw) < Decimal('0.0001')), \
+            f"Z amount {z_conv.amount} should be reachable via some valid path"
+
+
+def test_cyclic_alias_chain_all_starting_points(space_1, u1_s1):
+    """
+    For a 3-unit cycle, verify that starting from ANY unit on the cycle
+    yields the same set of units and consistent conversion values.
+    
+    Conversion graph:
+    1 A = 2 B, 1 B = 3 C, 1 C = 6 A
+    Therefore: 1 A = 2 B = 6 C
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_a = Unit.objects.create(name='A', base_unit='', space=space_1)
+        unit_b = Unit.objects.create(name='B', base_unit='', space=space_1)
+        unit_c = Unit.objects.create(name='C', base_unit='', space=space_1)
+
+        food = Food.objects.create(name='StartPoint Food', space=space_1)
+
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_a,
+            converted_amount=2, converted_unit=unit_b,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_b,
+            converted_amount=3, converted_unit=unit_c,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_c,
+            converted_amount=6, converted_unit=unit_a,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+
+        ing_a = Ingredient.objects.create(food=food, unit=unit_a, amount=Decimal('1'), space=space_1)
+        ing_b = Ingredient.objects.create(food=food, unit=unit_b, amount=Decimal('2'), space=space_1)
+        ing_c = Ingredient.objects.create(food=food, unit=unit_c, amount=Decimal('6'), space=space_1)
+
+        conv_a = {c.unit.name: c.amount for c in uch.get_conversions(ing_a)}
+        conv_b = {c.unit.name: c.amount for c in uch.get_conversions(ing_b)}
+        conv_c = {c.unit.name: c.amount for c in uch.get_conversions(ing_c)}
+
+        assert set(conv_a.keys()) == {'A', 'B', 'C'}
+        assert set(conv_b.keys()) == {'A', 'B', 'C'}
+        assert set(conv_c.keys()) == {'A', 'B', 'C'}
+
+        assert abs(conv_a['A'] - Decimal('1')) < Decimal('0.0001')
+
+        a_to_b = Decimal('1') * Decimal('2') / Decimal('1')
+        a_to_c_via_b = a_to_b * Decimal('3') / Decimal('1')
+        a_to_c_via_ca = Decimal('1') * Decimal('1') / Decimal('6')
+        assert abs(conv_a['B'] - a_to_b) < Decimal('0.0001')
+        assert (abs(conv_a['C'] - a_to_c_via_b) < Decimal('0.0001') or
+                abs(conv_a['C'] - a_to_c_via_ca) < Decimal('0.0001'))
+
+        assert abs(conv_b['B'] - Decimal('2')) < Decimal('0.0001')
+
+        b_to_a = Decimal('2') * Decimal('1') / Decimal('2')
+        b_to_c_via_direct = Decimal('2') * Decimal('3') / Decimal('1')
+        b_to_c_via_ab = b_to_a * Decimal('2') / Decimal('1') * Decimal('3') / Decimal('1')
+        assert abs(conv_b['A'] - b_to_a) < Decimal('0.0001')
+        assert (abs(conv_b['C'] - b_to_c_via_direct) < Decimal('0.0001') or
+                abs(conv_b['C'] - b_to_c_via_ab) < Decimal('0.0001'))
+
+        assert abs(conv_c['C'] - Decimal('6')) < Decimal('0.0001')
+
+        c_to_a = Decimal('6') * Decimal('6') / Decimal('1')
+        c_to_a_via_bc = Decimal('6') * Decimal('1') / Decimal('3') * Decimal('1') / Decimal('2')
+        assert (abs(conv_c['A'] - c_to_a) < Decimal('0.0001') or
+                abs(conv_c['A'] - c_to_a_via_bc) < Decimal('0.0001'))
+
+        c_to_b_via_ca = c_to_a * Decimal('2') / Decimal('1')
+        c_to_b_via_direct = Decimal('6') * Decimal('1') / Decimal('3')
+        assert (abs(conv_c['B'] - c_to_b_via_direct) < Decimal('0.0001') or
+                abs(conv_c['B'] - c_to_b_via_ca) < Decimal('0.0001'))
+
+
+def test_cyclic_alias_chain_with_self_loop(space_1, u1_s1):
+    """
+    A unit that converts to itself (self-loop) should not cause issues.
+    The visited set should prevent processing the same unit twice.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_a = Unit.objects.create(name='unit_a', base_unit='', space=space_1)
+        unit_b = Unit.objects.create(name='unit_b', base_unit='', space=space_1)
+
+        food = Food.objects.create(name='SelfLoop Food', space=space_1)
+
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_a,
+            converted_amount=1, converted_unit=unit_a,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_a,
+            converted_amount=5, converted_unit=unit_b,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+
+        ingredient = Ingredient.objects.create(
+            food=food, unit=unit_a, amount=Decimal('10'), space=space_1,
+        )
+
+        conversions = uch.get_conversions(ingredient)
+        unit_names = [c.unit.name for c in conversions]
+
+        assert len(unit_names) == len(set(unit_names)), "No duplicates allowed"
+        assert 'unit_a' in unit_names
+        assert 'unit_b' in unit_names
+
+        a_conv = next(c for c in conversions if c.unit.name == 'unit_a')
+        b_conv = next(c for c in conversions if c.unit.name == 'unit_b')
+
+        assert abs(a_conv.amount - Decimal('10')) < Decimal('0.0001')
+        assert abs(b_conv.amount - Decimal('50')) < Decimal('0.0001')
+
+
+def test_cyclic_alias_chain_with_branch(space_1, u1_s1):
+    """
+    Cycle with an extra branch off the cycle:
+    A ↔ B ↔ C ↔ A (cycle) plus C → D (branch off the cycle).
+    Both cycle and branch should be fully explored without looping.
+    
+    The key test here is that D is discovered (via C) regardless of the
+    path taken to reach C, proving the cycle protection doesn't prevent
+    exploration of branches.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_a = Unit.objects.create(name='A', base_unit='', space=space_1)
+        unit_b = Unit.objects.create(name='B', base_unit='', space=space_1)
+        unit_c = Unit.objects.create(name='C', base_unit='', space=space_1)
+        unit_d = Unit.objects.create(name='D', base_unit='', space=space_1)
+
+        food = Food.objects.create(name='Branch Food', space=space_1)
+
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_a,
+            converted_amount=2, converted_unit=unit_b,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_b,
+            converted_amount=3, converted_unit=unit_c,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_c,
+            converted_amount=6, converted_unit=unit_a,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_c,
+            converted_amount=10, converted_unit=unit_d,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+
+        ingredient = Ingredient.objects.create(
+            food=food, unit=unit_a, amount=Decimal('1'), space=space_1,
+        )
+
+        conversions = uch.get_conversions(ingredient)
+        unit_names = {c.unit.name for c in conversions}
+
+        assert unit_names == {'A', 'B', 'C', 'D'}, f"Expected all 4 units including branch D, got {unit_names}"
+
+        d_conv = next(c for c in conversions if c.unit.name == 'D')
+        c_conv = next(c for c in conversions if c.unit.name == 'C')
+
+        c_expected_via_b = Decimal('1') * Decimal('2') / Decimal('1') * Decimal('3') / Decimal('1')
+        c_expected_via_ca = Decimal('1') * Decimal('1') / Decimal('6')
+        assert (abs(c_conv.amount - c_expected_via_b) < Decimal('0.0001') or
+                abs(c_conv.amount - c_expected_via_ca) < Decimal('0.0001')), \
+            f"C amount {c_conv.amount} should be reachable via valid path"
+
+        expected_d = c_conv.amount * Decimal('10')
+        assert abs(d_conv.amount - expected_d) < Decimal('0.0001'), \
+            f"D amount should be C * 10, got {d_conv.amount}, expected {expected_d}"
+
+
+def test_cyclic_alias_chain_multi_space_isolation(space_1, space_2, u1_s1, u1_s2):
+    """
+    Each space has its own cycle. Cycle in space_1 must not affect or be
+    affected by cycle in space_2.
+    
+    Space 1: 1 A = 2 B, 1 B = 2 C, 1 C = 4 A → 1 A = 2 B = 4 C
+    Space 2: 1 X = 5 Y, 1 Y = 5 Z, 1 Z = 25 X → 1 X = 5 Y = 25 Z
+    """
+    with scopes_disabled():
+        uch_s1 = UnitConversionHelper(space_1)
+        uch_s2 = UnitConversionHelper(space_2)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_a_s1 = Unit.objects.create(name='A', base_unit='', space=space_1)
+        unit_b_s1 = Unit.objects.create(name='B', base_unit='', space=space_1)
+        unit_c_s1 = Unit.objects.create(name='C', base_unit='', space=space_1)
+
+        unit_x_s2 = Unit.objects.create(name='X', base_unit='', space=space_2)
+        unit_y_s2 = Unit.objects.create(name='Y', base_unit='', space=space_2)
+        unit_z_s2 = Unit.objects.create(name='Z', base_unit='', space=space_2)
+
+        food_s1 = Food.objects.create(name='Cycle S1', space=space_1)
+        food_s2 = Food.objects.create(name='Cycle S2', space=space_2)
+
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_a_s1,
+            converted_amount=2, converted_unit=unit_b_s1,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_b_s1,
+            converted_amount=2, converted_unit=unit_c_s1,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_c_s1,
+            converted_amount=4, converted_unit=unit_a_s1,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_x_s2,
+            converted_amount=5, converted_unit=unit_y_s2,
+            space=space_2, created_by=auth.get_user(u1_s2),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_y_s2,
+            converted_amount=5, converted_unit=unit_z_s2,
+            space=space_2, created_by=auth.get_user(u1_s2),
+        )
+        UnitConversion.objects.create(
+            base_amount=1, base_unit=unit_z_s2,
+            converted_amount=25, converted_unit=unit_x_s2,
+            space=space_2, created_by=auth.get_user(u1_s2),
+        )
+
+        ing_s1 = Ingredient.objects.create(food=food_s1, unit=unit_a_s1, amount=Decimal('1'), space=space_1)
+        ing_s2 = Ingredient.objects.create(food=food_s2, unit=unit_x_s2, amount=Decimal('1'), space=space_2)
+
+        conv_s1 = {c.unit.name: c.amount for c in uch_s1.get_conversions(ing_s1)}
+        conv_s2 = {c.unit.name: c.amount for c in uch_s2.get_conversions(ing_s2)}
+
+        assert set(conv_s1.keys()) == {'A', 'B', 'C'}, f"Space 1 should only have A,B,C, got {conv_s1.keys()}"
+        assert set(conv_s2.keys()) == {'X', 'Y', 'Z'}, f"Space 2 should only have X,Y,Z, got {conv_s2.keys()}"
+
+        assert abs(conv_s1['A'] - Decimal('1')) < Decimal('0.0001')
+        s1_b_expected = Decimal('1') * Decimal('2') / Decimal('1')
+        assert abs(conv_s1['B'] - s1_b_expected) < Decimal('0.0001')
+        s1_c_via_b = s1_b_expected * Decimal('2') / Decimal('1')
+        s1_c_via_ca = Decimal('1') * Decimal('1') / Decimal('4')
+        assert (abs(conv_s1['C'] - s1_c_via_b) < Decimal('0.0001') or
+                abs(conv_s1['C'] - s1_c_via_ca) < Decimal('0.0001'))
+
+        assert abs(conv_s2['X'] - Decimal('1')) < Decimal('0.0001')
+        s2_y_expected = Decimal('1') * Decimal('5') / Decimal('1')
+        assert abs(conv_s2['Y'] - s2_y_expected) < Decimal('0.0001')
+        s2_z_via_y = s2_y_expected * Decimal('5') / Decimal('1')
+        s2_z_via_zx = Decimal('1') * Decimal('1') / Decimal('25')
+        assert (abs(conv_s2['Z'] - s2_z_via_y) < Decimal('0.0001') or
+                abs(conv_s2['Z'] - s2_z_via_zx) < Decimal('0.0001'))
+
+
+def test_cyclic_alias_chain_high_precision(space_1, u1_s1):
+    """
+    Cycle with high-precision conversion factors (16 decimal places).
+    Verifies that precision is maintained through the cycle traversal.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_a = Unit.objects.create(name='A', base_unit='', space=space_1)
+        unit_b = Unit.objects.create(name='B', base_unit='', space=space_1)
+        unit_c = Unit.objects.create(name='C', base_unit='', space=space_1)
+
+        food = Food.objects.create(name='Precision Cycle Food', space=space_1)
+
+        UnitConversion.objects.create(
+            base_amount=Decimal('1.0000000000000001'), base_unit=unit_a,
+            converted_amount=Decimal('3.1415926535897932'), converted_unit=unit_b,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=Decimal('1.0000000000000001'), base_unit=unit_b,
+            converted_amount=Decimal('2.7182818284590452'), converted_unit=unit_c,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=Decimal('8.5397342226735671'), base_unit=unit_c,
+            converted_amount=Decimal('1.0000000000000002'), converted_unit=unit_a,
+            space=space_1, created_by=auth.get_user(u1_s1),
+        )
+
+        ingredient = Ingredient.objects.create(
+            food=food, unit=unit_a, amount=Decimal('1.0000000000000001'), space=space_1,
+        )
+
+        conversions = uch.get_conversions(ingredient)
+        unit_names = {c.unit.name for c in conversions}
+
+        assert unit_names == {'A', 'B', 'C'}
+
+        b_conv = next(c for c in conversions if c.unit.name == 'B')
+        c_conv = next(c for c in conversions if c.unit.name == 'C')
+
+        expected_b = Decimal('1.0000000000000001') * Decimal('3.1415926535897932') / Decimal('1.0000000000000001')
+        expected_c = expected_b * Decimal('2.7182818284590452') / Decimal('1.0000000000000001')
+
+        tolerance = Decimal('0.000000000001')
+        assert abs(b_conv.amount - expected_b) < tolerance
+        assert abs(c_conv.amount - expected_c) < tolerance

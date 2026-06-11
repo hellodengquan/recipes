@@ -95,6 +95,86 @@ describe('frac', () => {
         expect(n).toBe(1)
         expect(d).toBe(3)
     })
+
+    describe('while loop termination and boundary cases', () => {
+        it('terminates quickly with large denominator limit D=1000', () => {
+            const start = performance.now()
+            const result = frac(Math.PI, 1000, true)
+            const duration = performance.now() - start
+            expect(duration).toBeLessThan(100)
+            expect(result[2]).toBeLessThanOrEqual(1000)
+            const approx = result[0] + result[1] / result[2]
+            expect(Math.abs(approx - Math.PI)).toBeLessThan(0.001)
+        })
+
+        it('terminates with irrational number sqrt(2)', () => {
+            const start = performance.now()
+            const result = frac(Math.SQRT2, 100, true)
+            const duration = performance.now() - start
+            expect(duration).toBeLessThan(100)
+            expect(result[2]).toBeLessThanOrEqual(100)
+            const approx = result[0] + result[1] / result[2]
+            expect(Math.abs(approx - Math.SQRT2)).toBeLessThan(0.01)
+        })
+
+        it('terminates with golden ratio phi', () => {
+            const phi = (1 + Math.sqrt(5)) / 2
+            const start = performance.now()
+            const result = frac(phi, 100, true)
+            const duration = performance.now() - start
+            expect(duration).toBeLessThan(100)
+            expect(result[2]).toBeLessThanOrEqual(100)
+            const approx = result[0] + result[1] / result[2]
+            expect(Math.abs(approx - phi)).toBeLessThan(0.001)
+        })
+
+        it('terminates with very large integer part', () => {
+            const start = performance.now()
+            const result = frac(999999.999, 16, true)
+            const duration = performance.now() - start
+            expect(duration).toBeLessThan(100)
+            const approx = result[0] + result[1] / result[2]
+            expect(Math.abs(approx - 999999.999)).toBeLessThan(0.01)
+            expect(result[2]).toBeLessThanOrEqual(16)
+        })
+
+        it('terminates when x equals mediant m (early break)', () => {
+            const start = performance.now()
+            const result = frac(0.6, 10, true)
+            const duration = performance.now() - start
+            expect(duration).toBeLessThan(50)
+            expect(result[0]).toBe(0)
+            expect(result[1] / result[2]).toBeCloseTo(0.6)
+            expect(result[2]).toBeLessThanOrEqual(10)
+        })
+
+        it('terminates with D=10000 (extreme denominator limit)', () => {
+            const start = performance.now()
+            const result = frac(Math.PI, 10000, true)
+            const duration = performance.now() - start
+            expect(duration).toBeLessThan(500)
+            expect(result[2]).toBeLessThanOrEqual(10000)
+            const approx = result[0] + result[1] / result[2]
+            expect(Math.abs(approx - Math.PI)).toBeLessThan(0.00001)
+        })
+
+        it('terminates with number very close to integer but not equal', () => {
+            const start = performance.now()
+            const result = frac(5.0000001, 16, true)
+            const duration = performance.now() - start
+            expect(duration).toBeLessThan(100)
+            expect(result[0]).toBe(5)
+        })
+
+        it('terminates with repeated decimal 0.142857... (1/7)', () => {
+            const start = performance.now()
+            const result = frac(0.142857142857, 16, true)
+            const duration = performance.now() - start
+            expect(duration).toBeLessThan(100)
+            expect(result[1]).toBe(1)
+            expect(result[2]).toBe(7)
+        })
+    })
 })
 
 describe('roundDecimals', () => {
