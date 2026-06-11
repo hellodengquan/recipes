@@ -1820,6 +1820,7 @@ class CacheRefreshStatus(Enum):
     RUNNING = 'RUNNING'
     COMPLETED = 'COMPLETED'
     FAILED = 'FAILED'
+    RETRYING = 'RETRYING'
 
 
 class CacheRefreshType(Enum):
@@ -1834,6 +1835,7 @@ class CacheRefreshTask(models.Model, PermissionModelMixin):
         (CacheRefreshStatus.RUNNING.value, _('Running')),
         (CacheRefreshStatus.COMPLETED.value, _('Completed')),
         (CacheRefreshStatus.FAILED.value, _('Failed')),
+        (CacheRefreshStatus.RETRYING.value, _('Retrying')),
     )
 
     TYPE_CHOICES = (
@@ -1853,6 +1855,11 @@ class CacheRefreshTask(models.Model, PermissionModelMixin):
     processed_items = models.IntegerField(default=0)
     batch_size = models.IntegerField(default=100)
     batch_count = models.IntegerField(default=0)
+    last_processed_index = models.IntegerField(default=0)
+
+    retry_count = models.IntegerField(default=0)
+    max_retries = models.IntegerField(default=3)
+    cache_patterns = models.JSONField(default=list, blank=True)
 
     error_message = models.TextField(default='', blank=True)
 
@@ -1866,7 +1873,7 @@ class CacheRefreshTask(models.Model, PermissionModelMixin):
     objects = ScopedManager(space='space')
 
     def __str__(self):
-        return f"{self.task_type} - {self.status} ({self.processed_items}/{self.total_items})"
+        return f"{self.task_type} - {self.status} ({self.processed_items}/{self.total_items}, retry={self.retry_count})"
 
     class Meta:
         ordering = ('-created_at',)
@@ -1875,23 +1882,36 @@ class CacheRefreshTask(models.Model, PermissionModelMixin):
             Index(fields=['-created_at']),
         )
 
-    def update_progress(self, processed_batch_count=0):
+    def can_retry(self):
+        return self.retry_count < self.max_retries
+
+    def mark_retrying(self):
+        self.status = CacheRefreshStatus.RETRYING.value
+        self.retry_count += 1
+        self.save(update_fields=['status', 'retry_count'])
+
+    def update_progress(self, processed_batch_count=0, processed_index=None):
         if processed_batch_count > 0:
             self.processed_items += processed_batch_count
             self.batch_count += 1
+        if processed_index is not None:
+            self.last_processed_index = processed_index
+        update_fields = ['processed_items', 'batch_count', 'last_processed_index']
         if self.total_items > 0:
-            self.save(update_fields=['processed_items', 'batch_count'])
+            self.save(update_fields=update_fields)
 
     def mark_running(self):
         self.status = CacheRefreshStatus.RUNNING.value
-        self.started_at = timezone.now()
+        if not self.started_at:
+            self.started_at = timezone.now()
         self.save(update_fields=['status', 'started_at'])
 
     def mark_completed(self, message=''):
         self.status = CacheRefreshStatus.COMPLETED.value
         self.completed_at = timezone.now()
         self.message = message
-        self.save(update_fields=['status', 'completed_at', 'message'])
+        self.last_processed_index = self.total_items
+        self.save(update_fields=['status', 'completed_at', 'message', 'last_processed_index'])
 
     def mark_failed(self, error_message=''):
         self.status = CacheRefreshStatus.FAILED.value

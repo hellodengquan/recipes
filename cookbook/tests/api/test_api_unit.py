@@ -788,3 +788,271 @@ def test_unit_save_triggers_async_refresh(u1_s1, space_1, unit_gram):
         completed_task = wait_for_async_task(task.id, timeout=15)
         assert completed_task is not None
         assert completed_task.status == CacheRefreshStatus.COMPLETED.value
+
+
+def test_cache_refresh_task_resume_from_checkpoint(space_1):
+    import logging
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        test_cache_keys = []
+        for i in range(30):
+            key = f'{cache_helper.DELETE_COLLECTOR_CACHE_PREFIX}RESUME_TEST_{i}'
+            caches['default'].set(key, f'data_{i}', 60)
+            test_cache_keys.append(key)
+
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_MERGE.value,
+            source_unit_id=1,
+            target_unit_id=2,
+            batch_size=10,
+            space=space_1,
+            cache_patterns=test_cache_keys,
+        )
+
+        cache_backend = caches['default']
+        for i in range(12):
+            cache_backend.delete(test_cache_keys[i])
+
+        task.total_items = 30
+        task.processed_items = 12
+        task.batch_count = 2
+        task.last_processed_index = 12
+        task.status = CacheRefreshStatus.FAILED.value
+        task.retry_count = 1
+        task.save()
+
+        work = RefreshWork(task=task, cache_patterns=test_cache_keys)
+        AsyncCacheRefresher.process_refresh_work(work, logging.getLogger('test'))
+
+        task.refresh_from_db()
+        assert task.status == CacheRefreshStatus.COMPLETED.value
+        assert task.last_processed_index == 30
+
+        for key in test_cache_keys:
+            assert caches['default'].get(key) is None
+
+
+def test_cache_refresh_task_resume_from_mid_batch(space_1):
+    import logging
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        test_cache_keys = []
+        for i in range(50):
+            key = f'{cache_helper.DELETE_COLLECTOR_CACHE_PREFIX}MID_BATCH_{i}'
+            caches['default'].set(key, f'data_{i}', 60)
+            test_cache_keys.append(key)
+
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_DELETE.value,
+            source_unit_id=5,
+            batch_size=10,
+            space=space_1,
+            cache_patterns=test_cache_keys,
+        )
+
+        cache_backend = caches['default']
+        checkpoint = 35
+        for i in range(checkpoint):
+            cache_backend.delete(test_cache_keys[i])
+
+        task.total_items = 50
+        task.processed_items = checkpoint
+        task.batch_count = 3
+        task.last_processed_index = checkpoint
+        task.status = CacheRefreshStatus.RETRYING.value
+        task.retry_count = 1
+        task.save()
+
+        work = RefreshWork(task=task, cache_patterns=test_cache_keys)
+        AsyncCacheRefresher.process_refresh_work(work, logging.getLogger('test'))
+
+        task.refresh_from_db()
+        assert task.status == CacheRefreshStatus.COMPLETED.value
+        assert task.total_items == 50
+        assert task.last_processed_index == 50
+
+        for key in test_cache_keys:
+            assert caches['default'].get(key) is None
+
+
+def test_cache_refresh_task_retry_method(space_1):
+    with scopes_disabled():
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=1,
+            max_retries=3,
+            space=space_1,
+        )
+
+        assert task.can_retry() is True
+        assert task.retry_count == 0
+
+        task.mark_retrying()
+        task.refresh_from_db()
+        assert task.retry_count == 1
+        assert task.status == CacheRefreshStatus.RETRYING.value
+        assert task.can_retry() is True
+
+        task.mark_retrying()
+        task.mark_retrying()
+        task.refresh_from_db()
+        assert task.retry_count == 3
+        assert task.can_retry() is False
+
+        task.mark_failed('final failure')
+        task.refresh_from_db()
+        assert task.status == CacheRefreshStatus.FAILED.value
+        assert task.error_message == 'final failure'
+
+
+def test_cache_refresh_task_update_progress_with_index(space_1):
+    with scopes_disabled():
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_MERGE.value,
+            source_unit_id=10,
+            target_unit_id=20,
+            total_items=100,
+            batch_size=25,
+            space=space_1,
+        )
+
+        task.mark_running()
+
+        task.update_progress(processed_batch_count=25, processed_index=25)
+        task.refresh_from_db()
+        assert task.processed_items == 25
+        assert task.last_processed_index == 25
+        assert task.batch_count == 1
+
+        task.update_progress(processed_batch_count=25, processed_index=50)
+        task.refresh_from_db()
+        assert task.processed_items == 50
+        assert task.last_processed_index == 50
+        assert task.batch_count == 2
+
+        task.mark_completed('done')
+        task.refresh_from_db()
+        assert task.last_processed_index == 100
+
+
+def test_submit_retry_task_success(space_1):
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        test_cache_keys = []
+        for i in range(5):
+            key = f'{cache_helper.DELETE_COLLECTOR_CACHE_PREFIX}RETRY_SUBMIT_{i}'
+            caches['default'].set(key, f'data_{i}', 60)
+            test_cache_keys.append(key)
+
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_DELETE.value,
+            source_unit_id=1,
+            batch_size=10,
+            max_retries=2,
+            retry_count=1,
+            space=space_1,
+            cache_patterns=test_cache_keys,
+            status=CacheRefreshStatus.FAILED.value,
+            error_message='simulated failure',
+        )
+
+        assert task.can_retry() is True
+
+        retried_task = AsyncCacheRefresher.submit_retry_task(task.id)
+        assert retried_task is not None
+        assert retried_task.retry_count == 2
+        assert retried_task.status == CacheRefreshStatus.RETRYING.value
+
+
+def test_submit_retry_task_exceeds_max_retries(space_1):
+    with scopes_disabled():
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_MERGE.value,
+            source_unit_id=1,
+            target_unit_id=2,
+            max_retries=3,
+            retry_count=3,
+            space=space_1,
+            status=CacheRefreshStatus.FAILED.value,
+            error_message='too many retries',
+        )
+
+        assert task.can_retry() is False
+
+        retried_task = AsyncCacheRefresher.submit_retry_task(task.id)
+        assert retried_task is None
+
+
+def test_submit_retry_task_not_exist(space_1):
+    retried_task = AsyncCacheRefresher.submit_retry_task(999999)
+    assert retried_task is None
+
+
+def test_cache_refresh_task_patterns_saved_on_creation(space_1):
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        task = AsyncCacheRefresher.submit_unit_save_refresh(
+            space=space_1,
+            unit_id=42,
+        )
+
+        task.refresh_from_db()
+        assert len(task.cache_patterns) > 0
+        assert cache_helper.BASE_UNITS_CACHE_KEY in task.cache_patterns
+        assert cache_helper.PROPERTY_TYPE_CACHE_KEY in task.cache_patterns
+        assert any(p.startswith(cache_helper.DELETE_COLLECTOR_CACHE_PREFIX) for p in task.cache_patterns)
+
+
+def test_process_refresh_work_simulated_failure_then_resume(space_1):
+    import logging
+    logger = logging.getLogger('test_failure')
+
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        test_cache_keys = []
+        total_keys = 20
+        for i in range(total_keys):
+            key = f'{cache_helper.DELETE_COLLECTOR_CACHE_PREFIX}FAIL_TEST_{i}'
+            caches['default'].set(key, f'data_{i}', 60)
+            test_cache_keys.append(key)
+
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_MERGE.value,
+            source_unit_id=1,
+            target_unit_id=3,
+            batch_size=7,
+            space=space_1,
+            cache_patterns=test_cache_keys,
+        )
+
+        checkpoint = 7
+        cache_backend = caches['default']
+        for i in range(checkpoint):
+            cache_backend.delete(test_cache_keys[i])
+
+        task.total_items = total_keys
+        task.processed_items = checkpoint
+        task.batch_count = 1
+        task.last_processed_index = checkpoint
+        task.status = CacheRefreshStatus.FAILED.value
+        task.error_message = 'Simulated network error'
+        task.retry_count = 1
+        task.max_retries = 3
+        task.save()
+
+        remaining_before = sum(1 for k in test_cache_keys if caches['default'].get(k) is not None)
+        assert remaining_before == total_keys - checkpoint
+
+        work = RefreshWork(task=task, cache_patterns=test_cache_keys)
+        AsyncCacheRefresher.process_refresh_work(work, logger)
+
+        task.refresh_from_db()
+        assert task.status == CacheRefreshStatus.COMPLETED.value
+        assert task.last_processed_index == total_keys
+        assert task.processed_items >= total_keys
+
+        remaining_after = sum(1 for k in test_cache_keys if caches['default'].get(k) is not None)
+        assert remaining_after == 0
+
+        for key in test_cache_keys:
+            assert caches['default'].get(key) is None
