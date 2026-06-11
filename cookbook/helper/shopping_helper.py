@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
+from django.db import transaction
 from django.db.models import F, OuterRef, Q, Subquery, Value
 from django.db.models.functions import Coalesce
 from django.utils.translation import gettext as _
@@ -479,27 +480,35 @@ class MealPlanShoppingSync:
             'merged': 0,
             'removed': 0,
             'failed': 0,
-            'errors': []
+            'errors': [],
+            'rolled_back': False
         }
 
         changes_to_apply = preview.changes
         if selected_changes is not None:
             changes_to_apply = [preview.changes[i] for i in selected_changes if 0 <= i < len(preview.changes)]
 
-        for idx, change in enumerate(changes_to_apply):
-            try:
-                if change.change_type == CHANGE_TYPE_ADD:
-                    self._apply_add(change)
-                    results['added'] += 1
-                elif change.change_type == CHANGE_TYPE_MERGE:
-                    self._apply_merge(change)
-                    results['merged'] += 1
-                elif change.change_type == CHANGE_TYPE_REMOVE:
-                    self._apply_remove(change)
-                    results['removed'] += 1
-            except Exception as e:
-                results['failed'] += 1
-                results['errors'].append(f'Change {idx} ({change.change_type}): {str(e)}')
+        try:
+            with transaction.atomic():
+                for idx, change in enumerate(changes_to_apply):
+                    if change.change_type == CHANGE_TYPE_ADD:
+                        self._apply_add(change)
+                        results['added'] += 1
+                    elif change.change_type == CHANGE_TYPE_MERGE:
+                        self._apply_merge(change)
+                        results['merged'] += 1
+                    elif change.change_type == CHANGE_TYPE_REMOVE:
+                        self._apply_remove(change)
+                        results['removed'] += 1
+        except Exception as e:
+            results['rolled_back'] = True
+            results['failed'] = len(changes_to_apply)
+            results['errors'].append(
+                f"Atomic transaction rolled back due to error: {type(e).__name__}: {str(e)}"
+            )
+            results['added'] = 0
+            results['merged'] = 0
+            results['removed'] = 0
 
         return results
 

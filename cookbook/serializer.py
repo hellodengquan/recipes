@@ -2283,3 +2283,4 @@ class ShoppingSyncApplyResultSerializer(serializers.Serializer):
     removed = serializers.IntegerField()
     failed = serializers.IntegerField()
     errors = serializers.ListField(child=serializers.CharField())
+    rolled_back = serializers.BooleanField()
