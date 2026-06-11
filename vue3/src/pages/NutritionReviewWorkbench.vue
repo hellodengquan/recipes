@@ -66,6 +66,58 @@
                         </v-btn>
                     </v-col>
                 </v-row>
+                <v-divider class="my-3"></v-divider>
+                <v-row align="center" v-if="totalItems > 0">
+                    <v-col cols="12" sm="6">
+                        <div class="d-flex align-center gap-3">
+                            <v-btn
+                                variant="outlined"
+                                size="small"
+                                @click="toggleSelectAll"
+                            >
+                                <v-icon :icon="isAllSelected ? 'fas fa-square-minus' : 'fas fa-square-check'" class="me-2"></v-icon>
+                                {{ isAllSelected ? $t('NutritionReview_DeselectAll') : $t('NutritionReview_SelectAll') }}
+                            </v-btn>
+                            <v-chip color="primary" variant="tonal" v-if="selectedRecipeIds.size > 0">
+                                {{ $t('NutritionReview_SelectedCount', { count: selectedRecipeIds.size }) }}
+                            </v-chip>
+                        </div>
+                    </v-col>
+                    <v-col cols="12" sm="6">
+                        <div class="d-flex justify-end gap-2">
+                            <v-btn
+                                color="success"
+                                size="small"
+                                :disabled="selectedRecipeIds.size === 0 || !canApprove"
+                                :loading="batchActionLoading"
+                                @click="openBatchApproveDialog"
+                            >
+                                <v-icon icon="fas fa-check-double" class="me-2"></v-icon>
+                                {{ $t('NutritionReview_BatchApprove') }}
+                            </v-btn>
+                            <v-btn
+                                color="error"
+                                size="small"
+                                :disabled="selectedRecipeIds.size === 0 || !canApprove"
+                                :loading="batchActionLoading"
+                                @click="openBatchRejectDialog"
+                            >
+                                <v-icon icon="fas fa-times-circle" class="me-2"></v-icon>
+                                {{ $t('NutritionReview_BatchReject') }}
+                            </v-btn>
+                            <v-btn
+                                color="warning"
+                                size="small"
+                                :disabled="selectedRecipeIds.size === 0 || !canFlag"
+                                :loading="batchActionLoading"
+                                @click="openBatchFlagDialog"
+                            >
+                                <v-icon icon="fas fa-flag" class="me-2"></v-icon>
+                                {{ $t('NutritionReview_BatchFlag') }}
+                            </v-btn>
+                        </div>
+                    </v-col>
+                </v-row>
             </v-card-text>
         </v-card>
 
@@ -128,6 +180,15 @@
                         <v-table density="comfortable">
                             <thead>
                                 <tr>
+                                    <th class="text-center" style="width: 48px;">
+                                        <v-checkbox
+                                            :model-value="isGroupSelected(items)"
+                                            :indeterminate="isGroupIndeterminate(items)"
+                                            density="compact"
+                                            hide-details
+                                            @click.stop="toggleGroupSelection(items)"
+                                        ></v-checkbox>
+                                    </th>
                                     <th>{{ $t('NutritionReview_Ingredient') }}</th>
                                     <th>{{ $t('NutritionReview_Amount') }}</th>
                                     <th>{{ $t('NutritionReview_Unit') }}</th>
@@ -138,7 +199,15 @@
                                 </tr>
                             </thead>
                             <tbody>
-                                <tr v-for="item in items" :key="`${item.ingredient_id}-${item.recipe_id}`">
+                                <tr v-for="item in items" :key="`${item.ingredient_id}-${item.recipe_id}`" :class="{ 'bg-primary-lighten-5': isItemSelected(item) }">
+                                    <td class="text-center">
+                                        <v-checkbox
+                                            :model-value="isItemSelected(item)"
+                                            density="compact"
+                                            hide-details
+                                            @click.stop="toggleItemSelection(item)"
+                                        ></v-checkbox>
+                                    </td>
                                     <td>
                                         <div class="font-weight-medium">{{ item.food?.name || item.original_text }}</div>
                                         <div class="text-body-2 text-medium-emphasis">
@@ -287,6 +356,46 @@
                 </v-card-actions>
             </v-card>
         </v-dialog>
+
+        <v-dialog v-model="batchActionDialog.show" max-width="550">
+            <v-card>
+                <v-closable-card-title v-model="batchActionDialog.show" :title="getBatchDialogTitle()"></v-closable-card-title>
+                <v-card-text>
+                    <v-alert
+                        :type="batchActionDialog.type"
+                        variant="tonal"
+                        class="mb-4"
+                    >
+                        {{ getBatchConfirmMessage() }}
+                    </v-alert>
+                    <v-chip color="primary" variant="tonal" class="mb-4">
+                        <v-icon icon="fas fa-list-check" class="me-2"></v-icon>
+                        {{ $t('NutritionReview_SelectedCount', { count: selectedRecipeIds.size }) }}
+                    </v-chip>
+                    <v-textarea
+                        v-model="batchActionDialog.comment"
+                        :label="$t('NutritionReview_EnterComment')"
+                        rows="3"
+                        variant="outlined"
+                        auto-grow
+                    ></v-textarea>
+                </v-card-text>
+                <v-card-actions>
+                    <v-btn @click="batchActionDialog.show = false" variant="outlined">
+                        {{ $t('NutritionReview_Cancel') }}
+                    </v-btn>
+                    <v-spacer></v-spacer>
+                    <v-btn
+                        :color="batchActionDialog.btnColor"
+                        :loading="batchActionLoading"
+                        @click="executeBatchAction"
+                    >
+                        <v-icon :icon="batchActionDialog.btnIcon" class="me-2"></v-icon>
+                        {{ batchActionDialog.btnText }}
+                    </v-btn>
+                </v-card-actions>
+            </v-card>
+        </v-dialog>
     </v-container>
 </template>
 
@@ -300,7 +409,7 @@ import {
     type NutritionReviewItem,
     type NutritionReviewSummary,
 } from '@/types/NutritionReview'
-import { ErrorMessageType, useMessageStore } from '@/stores/MessageStore'
+import { ErrorMessageType, MessageType, useMessageStore } from '@/stores/MessageStore'
 import { PreparedMessage } from '@/stores/MessageStore'
 import VClosableCardTitle from '@/components/dialogs/VClosableCardTitle.vue'
 
@@ -308,12 +417,15 @@ const { t } = useI18n()
 
 const loadingSummary = ref(false)
 const loadingList = ref(false)
+const batchActionLoading = ref(false)
 
 const summary = ref<NutritionReviewSummary | null>(null)
 const reviewItems = ref<NutritionReviewItem[]>([])
 
 const selectedGroupBy = ref<'food' | 'recipe' | 'unit'>('food')
 const selectedConfidenceFilter = ref('all')
+
+const selectedRecipeIds = ref<Set<number>>(new Set())
 
 const groupByOptions = [
     { title: t('NutritionReview_GroupByFood'), value: 'food' },
@@ -402,6 +514,101 @@ const actionDialog = ref({
     btnIcon: '',
     btnColor: '',
 })
+
+const batchActionDialog = ref({
+    show: false,
+    type: 'success' as 'success' | 'error' | 'warning',
+    action: '' as 'approve' | 'reject' | 'flag',
+    comment: '',
+    btnText: '',
+    btnIcon: '',
+    btnColor: '',
+})
+
+const allVisibleRecipeIds = computed(() => {
+    const ids = new Set<number>()
+    reviewItems.value.forEach(item => {
+        if (item.recipe_id) {
+            ids.add(item.recipe_id)
+        }
+    })
+    return ids
+})
+
+const isAllSelected = computed(() => {
+    const visibleIds = allVisibleRecipeIds.value
+    if (visibleIds.size === 0) return false
+    for (const id of visibleIds) {
+        if (!selectedRecipeIds.value.has(id)) return false
+    }
+    return true
+})
+
+function getUniqueRecipeIds(items: NutritionReviewItem[]): Set<number> {
+    const ids = new Set<number>()
+    items.forEach(item => {
+        if (item.recipe_id) {
+            ids.add(item.recipe_id)
+        }
+    })
+    return ids
+}
+
+function isGroupSelected(items: NutritionReviewItem[]): boolean {
+    const recipeIds = getUniqueRecipeIds(items)
+    if (recipeIds.size === 0) return false
+    for (const id of recipeIds) {
+        if (!selectedRecipeIds.value.has(id)) return false
+    }
+    return true
+}
+
+function isGroupIndeterminate(items: NutritionReviewItem[]): boolean {
+    const recipeIds = getUniqueRecipeIds(items)
+    if (recipeIds.size === 0) return false
+    let selectedCount = 0
+    for (const id of recipeIds) {
+        if (selectedRecipeIds.value.has(id)) selectedCount++
+    }
+    return selectedCount > 0 && selectedCount < recipeIds.size
+}
+
+function isItemSelected(item: NutritionReviewItem): boolean {
+    return item.recipe_id ? selectedRecipeIds.value.has(item.recipe_id) : false
+}
+
+function toggleSelectAll() {
+    if (isAllSelected.value) {
+        selectedRecipeIds.value.clear()
+    } else {
+        selectedRecipeIds.value = new Set(allVisibleRecipeIds.value)
+    }
+}
+
+function toggleGroupSelection(items: NutritionReviewItem[]) {
+    const recipeIds = getUniqueRecipeIds(items)
+    const allSelected = isGroupSelected(items)
+
+    if (allSelected) {
+        recipeIds.forEach(id => selectedRecipeIds.value.delete(id))
+    } else {
+        recipeIds.forEach(id => selectedRecipeIds.value.add(id))
+    }
+
+    selectedRecipeIds.value = new Set(selectedRecipeIds.value)
+}
+
+function toggleItemSelection(item: NutritionReviewItem) {
+    if (!item.recipe_id) return
+
+    if (selectedRecipeIds.value.has(item.recipe_id)) {
+        selectedRecipeIds.value.delete(item.recipe_id)
+    } else {
+        selectedRecipeIds.value.add(item.recipe_id)
+    }
+
+    selectedRecipeIds.value = new Set(selectedRecipeIds.value)
+}
 
 function getRoleText(role: string): string {
     const roleMap: Record<string, string> = {
@@ -581,6 +788,104 @@ async function executeAction() {
         useMessageStore().addError(ErrorMessageType.UPDATE_ERROR, err)
     } finally {
         actionDialog.value.loading = false
+    }
+}
+
+function openBatchApproveDialog() {
+    batchActionDialog.value = {
+        show: true,
+        type: 'success',
+        action: 'approve',
+        comment: '',
+        btnText: t('NutritionReview_BatchApprove'),
+        btnIcon: 'fas fa-check-double',
+        btnColor: 'success',
+    }
+}
+
+function openBatchRejectDialog() {
+    batchActionDialog.value = {
+        show: true,
+        type: 'error',
+        action: 'reject',
+        comment: '',
+        btnText: t('NutritionReview_BatchReject'),
+        btnIcon: 'fas fa-times-circle',
+        btnColor: 'error',
+    }
+}
+
+function openBatchFlagDialog() {
+    batchActionDialog.value = {
+        show: true,
+        type: 'warning',
+        action: 'flag',
+        comment: '',
+        btnText: t('NutritionReview_BatchFlag'),
+        btnIcon: 'fas fa-flag',
+        btnColor: 'warning',
+    }
+}
+
+function getBatchDialogTitle(): string {
+    const titles: Record<string, string> = {
+        'approve': t('NutritionReview_BatchApprove'),
+        'reject': t('NutritionReview_BatchReject'),
+        'flag': t('NutritionReview_BatchFlag'),
+    }
+    return titles[batchActionDialog.value.action] || ''
+}
+
+function getBatchConfirmMessage(): string {
+    const count = selectedRecipeIds.size
+    const messages: Record<string, string> = {
+        'approve': t('NutritionReview_BatchApproveConfirm', { count }),
+        'reject': t('NutritionReview_BatchRejectConfirm', { count }),
+        'flag': t('NutritionReview_BatchFlagConfirm', { count }),
+    }
+    return messages[batchActionDialog.value.action] || ''
+}
+
+async function executeBatchAction() {
+    if (selectedRecipeIds.size === 0) return
+
+    batchActionLoading.value = true
+    try {
+        const recipeIds = Array.from(selectedRecipeIds.value)
+        const comment = batchActionDialog.value.comment || undefined
+
+        let result
+        switch (batchActionDialog.value.action) {
+            case 'approve':
+                result = await NutritionReviewService.batchApproveRecipes(recipeIds, comment)
+                break
+            case 'reject':
+                result = await NutritionReviewService.batchRejectRecipes(recipeIds, comment)
+                break
+            case 'flag':
+                result = await NutritionReviewService.batchFlagRecipes(recipeIds, { comment })
+                break
+            default:
+                return
+        }
+
+        const successCount = result.approved_count ?? result.rejected_count ?? result.flagged_count ?? 0
+        useMessageStore().addMessage(
+            MessageType.SUCCESS,
+            t('NutritionReview_BatchSuccess', {
+                success: successCount,
+                failed: result.failed_count,
+            }),
+            5000
+        )
+
+        selectedRecipeIds.value.clear()
+        batchActionDialog.value.show = false
+        await refreshData()
+    } catch (err) {
+        useMessageStore().addError(ErrorMessageType.UPDATE_ERROR, err)
+    } finally {
+        batchActionLoading.value = false
     }
 }
 

@@ -95,6 +95,25 @@ export interface NutritionReviewActionRequest {
     comment?: string
 }
 
+export interface NutritionBatchActionRequest {
+    recipe_ids: number[]
+    comment?: string
+    reason?: string
+    confidence_score?: number
+}
+
+export interface NutritionBatchActionResult {
+    success: boolean
+    approved_count?: number
+    rejected_count?: number
+    flagged_count?: number
+    failed_count: number
+    failed_items: Array<{
+        recipe_id: number
+        error: string
+    }>
+}
+
 export interface ConfidenceFilterOption {
     label: string
     value: string

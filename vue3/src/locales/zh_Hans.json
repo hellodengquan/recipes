@@ -1047,5 +1047,18 @@
     "NutritionReview_MissingFood": "缺少食材",
     "NutritionReview_MissingUnit": "缺少单位",
     "NutritionReview_UnknownFood": "未知食材",
-    "NutritionReview_UnknownUnit": "未知单位"
+    "NutritionReview_UnknownUnit": "未知单位",
+    "NutritionReview_BatchSelect": "批量选择",
+    "NutritionReview_SelectAll": "全选",
+    "NutritionReview_DeselectAll": "取消全选",
+    "NutritionReview_SelectedCount": "已选择 {count} 项",
+    "NutritionReview_BatchApprove": "批量批准",
+    "NutritionReview_BatchReject": "批量拒绝",
+    "NutritionReview_BatchFlag": "批量标记",
+    "NutritionReview_ConfirmBatchAction": "确认批量操作",
+    "NutritionReview_BatchApproveConfirm": "您确定要批准选中的 {count} 个食谱的营养数据吗？",
+    "NutritionReview_BatchRejectConfirm": "您确定要拒绝选中的 {count} 个食谱的营养数据吗？",
+    "NutritionReview_BatchFlagConfirm": "您确定要标记选中的 {count} 个食谱的营养数据需复核吗？",
+    "NutritionReview_BatchSuccess": "批量操作成功：{success} 个成功，{failed} 个失败",
+    "NutritionReview_BatchFailed": "批量操作失败"
 }

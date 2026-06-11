@@ -3590,3 +3590,133 @@ class NutritionReviewPendingView(APIView):
             'next': None,
             'previous': None,
         }, status=status.HTTP_200_OK)
+
+
+class NutritionReviewBatchApproveView(APIView):
+    permission_classes = [CustomNutritionReviewApprove & CustomTokenHasReadWriteScope]
+
+    def post(self, request):
+        recipe_ids = request.data.get('recipe_ids', [])
+        comment = request.data.get('comment', None)
+
+        if not recipe_ids or not isinstance(recipe_ids, list):
+            raise ValidationError('Please provide a list of recipe_ids.')
+
+        role_info = get_nutrition_role_permissions(request.user, request.space)
+        can_view_all = role_info['permissions'].get('view_all_pending', False)
+
+        qs = NutritionInformation.objects.filter(
+            space=request.space,
+            recipe__id__in=recipe_ids,
+        )
+
+        if not can_view_all:
+            qs = qs.filter(recipe__created_by=request.user)
+
+        approved_count = 0
+        failed_ids = []
+
+        for nutr_info in qs:
+            try:
+                nutr_info.approve(request.user, comment=comment)
+                approved_count += 1
+            except Exception as e:
+                recipe = nutr_info.recipe_set.first() if hasattr(nutr_info, 'recipe_set') else None
+                failed_ids.append({
+                    'recipe_id': recipe.id if recipe else nutr_info.id,
+                    'error': str(e),
+                })
+
+        return Response({
+            'success': True,
+            'approved_count': approved_count,
+            'failed_count': len(failed_ids),
+            'failed_items': failed_ids,
+        }, status=status.HTTP_200_OK)
+
+
+class NutritionReviewBatchRejectView(APIView):
+    permission_classes = [CustomNutritionReviewApprove & CustomTokenHasReadWriteScope]
+
+    def post(self, request):
+        recipe_ids = request.data.get('recipe_ids', [])
+        comment = request.data.get('comment', None)
+
+        if not recipe_ids or not isinstance(recipe_ids, list):
+            raise ValidationError('Please provide a list of recipe_ids.')
+
+        role_info = get_nutrition_role_permissions(request.user, request.space)
+        can_view_all = role_info['permissions'].get('view_all_pending', False)
+
+        qs = NutritionInformation.objects.filter(
+            space=request.space,
+            recipe__id__in=recipe_ids,
+        )
+
+        if not can_view_all:
+            qs = qs.filter(recipe__created_by=request.user)
+
+        rejected_count = 0
+        failed_ids = []
+
+        for nutr_info in qs:
+            try:
+                nutr_info.reject(request.user, comment=comment)
+                rejected_count += 1
+            except Exception as e:
+                recipe = nutr_info.recipe_set.first() if hasattr(nutr_info, 'recipe_set') else None
+                failed_ids.append({
+                    'recipe_id': recipe.id if recipe else nutr_info.id,
+                    'error': str(e),
+                })
+
+        return Response({
+            'success': True,
+            'rejected_count': rejected_count,
+            'failed_count': len(failed_ids),
+            'failed_items': failed_ids,
+        }, status=status.HTTP_200_OK)
+
+
+class NutritionReviewBatchFlagView(APIView):
+    permission_classes = [CustomNutritionFlag & CustomTokenHasReadWriteScope]
+
+    def post(self, request):
+        recipe_ids = request.data.get('recipe_ids', [])
+        reason = request.data.get('reason', None)
+        confidence_score = request.data.get('confidence_score', None)
+
+        if not recipe_ids or not isinstance(recipe_ids, list):
+            raise ValidationError('Please provide a list of recipe_ids.')
+
+        role_info = get_nutrition_role_permissions(request.user, request.space)
+        can_view_all = role_info['permissions'].get('view_all_pending', False)
+
+        qs = NutritionInformation.objects.filter(
+            space=request.space,
+            recipe__id__in=recipe_ids,
+        )
+
+        if not can_view_all:
+            qs = qs.filter(recipe__created_by=request.user)
+
+        flagged_count = 0
+        failed_ids = []
+
+        for nutr_info in qs:
+            try:
+                nutr_info.mark_for_review(reason=reason, confidence=confidence_score)
+                flagged_count += 1
+            except Exception as e:
+                recipe = nutr_info.recipe_set.first() if hasattr(nutr_info, 'recipe_set') else None
+                failed_ids.append({
+                    'recipe_id': recipe.id if recipe else nutr_info.id,
+                    'error': str(e),
+                })
+
+        return Response({
+            'success': True,
+            'flagged_count': flagged_count,
+            'failed_count': len(failed_ids),
+            'failed_items': failed_ids,
+        }, status=status.HTTP_200_OK)

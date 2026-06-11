@@ -4,6 +4,7 @@ import type {
     NutritionReviewSummary,
     NutritionPendingReviewItem,
     NutritionReviewItem,
+    NutritionBatchActionResult,
 } from '@/types/NutritionReview'
 
 const BASE_URL = '/api'
@@ -156,6 +157,55 @@ export const NutritionReviewService = {
         }
 
         return allItems
+    },
+
+    async batchApproveRecipes(recipeIds: number[], comment?: string): Promise<NutritionBatchActionResult> {
+        const response = await fetch(`${BASE_URL}/nutrition-review/batch-approve/`, {
+            method: 'POST',
+            headers: getHeaders(),
+            credentials: 'same-origin',
+            body: JSON.stringify({
+                recipe_ids: recipeIds,
+                comment,
+            }),
+        })
+        return handleResponse<NutritionBatchActionResult>(response)
+    },
+
+    async batchRejectRecipes(recipeIds: number[], comment?: string): Promise<NutritionBatchActionResult> {
+        const response = await fetch(`${BASE_URL}/nutrition-review/batch-reject/`, {
+            method: 'POST',
+            headers: getHeaders(),
+            credentials: 'same-origin',
+            body: JSON.stringify({
+                recipe_ids: recipeIds,
+                comment,
+            }),
+        })
+        return handleResponse<NutritionBatchActionResult>(response)
+    },
+
+    async batchFlagRecipes(recipeIds: number[], data?: { comment?: string; reason?: string; confidence_score?: number }): Promise<NutritionBatchActionResult> {
+        const body: Record<string, unknown> = {
+            recipe_ids: recipeIds,
+        }
+        if (data?.comment !== undefined) {
+            body.reason = data.comment
+        }
+        if (data?.reason !== undefined) {
+            body.reason = data.reason
+        }
+        if (data?.confidence_score !== undefined) {
+            body.confidence_score = data.confidence_score
+        }
+
+        const response = await fetch(`${BASE_URL}/nutrition-review/batch-flag/`, {
+            method: 'POST',
+            headers: getHeaders(),
+            credentials: 'same-origin',
+            body: JSON.stringify(body),
+        })
+        return handleResponse<NutritionBatchActionResult>(response)
     },
 }
 

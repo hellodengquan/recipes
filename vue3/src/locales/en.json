@@ -1044,5 +1044,18 @@
   "NutritionReview_MissingFood": "Missing Food",
   "NutritionReview_MissingUnit": "Missing Unit",
   "NutritionReview_UnknownFood": "Unknown Food",
-  "NutritionReview_UnknownUnit": "Unknown Unit"
+  "NutritionReview_UnknownUnit": "Unknown Unit",
+  "NutritionReview_BatchSelect": "Batch Select",
+  "NutritionReview_SelectAll": "Select All",
+  "NutritionReview_DeselectAll": "Deselect All",
+  "NutritionReview_SelectedCount": "{count} selected",
+  "NutritionReview_BatchApprove": "Batch Approve",
+  "NutritionReview_BatchReject": "Batch Reject",
+  "NutritionReview_BatchFlag": "Batch Flag",
+  "NutritionReview_ConfirmBatchAction": "Confirm Batch Action",
+  "NutritionReview_BatchApproveConfirm": "Are you sure you want to approve nutrition data for {count} selected recipes?",
+  "NutritionReview_BatchRejectConfirm": "Are you sure you want to reject nutrition data for {count} selected recipes?",
+  "NutritionReview_BatchFlagConfirm": "Are you sure you want to flag nutrition data for {count} selected recipes for review?",
+  "NutritionReview_BatchSuccess": "Batch action completed: {success} succeeded, {failed} failed",
+  "NutritionReview_BatchFailed": "Batch action failed"
 }
