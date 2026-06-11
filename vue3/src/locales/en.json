@@ -1009,5 +1009,8 @@
   "CreatedAt": "Created At",
   "ChangeRequestApproved": "Change request approved successfully.",
   "ChangeRequestRejected": "Change request rejected.",
-  "ChangeRequestWithdrawn": "Change request withdrawn."
+  "ChangeRequestWithdrawn": "Change request withdrawn.",
+  "Resubmit": "Resubmit",
+  "ResubmitChangeRequest": "Resubmit Change Request",
+  "Cancel": "Cancel"
 }

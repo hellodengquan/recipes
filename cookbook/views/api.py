@@ -82,7 +82,7 @@ from cookbook.helper.permission_helper import (CustomIsAdmin, CustomIsOwner, Cus
                                                above_space_limit,
                                                group_required, has_group_permission, is_space_owner,
                                                switch_user_active_space, CustomAiProviderPermission, IsCreateDRF, CustomIsOwnerDestroyOnly, CustomIsHousehold,
-                                               get_household_user_ids)
+                                               get_household_user_ids, IsCreateOrWithdrawOrResubmitDRF)
 from cookbook.helper.recipe_search import RecipeSearch
 from cookbook.helper.recipe_url_import import clean_dict, get_from_youtube_scraper, get_images_from_soup
 from cookbook.helper.shopping_helper import RecipeShoppingEditor
@@ -107,7 +107,7 @@ from cookbook.serializer import (AccessTokenSerializer, AutomationSerializer, Au
                                  InviteLinkSerializer, KeywordSerializer, MealPlanSerializer, MealTypeSerializer,
                                  PropertySerializer, PropertyTypeSerializer,
                                  RecipeBookEntrySerializer, RecipeBookSerializer, RecipeExportSerializer,
-                                 RecipeBookEntryChangeRequestSerializer, RecipeBookChangeRequestReviewSerializer,
+                                 RecipeBookEntryChangeRequestSerializer, RecipeBookChangeRequestReviewSerializer, RecipeBookChangeRequestResubmitSerializer,
                                  RecipeFlatSerializer, RecipeFromSourceSerializer, RecipeImageSerializer,
                                  RecipeOverviewSerializer, RecipeSerializer, RecipeShoppingUpdateSerializer,
                                  RecipeSimpleSerializer, ShoppingListEntryBulkSerializer,
@@ -1477,7 +1477,7 @@ class RecipeBookEntryViewSet(LoggingMixin, viewsets.ModelViewSet):
 class RecipeBookEntryChangeRequestViewSet(LoggingMixin, viewsets.ModelViewSet):
     queryset = RecipeBookEntryChangeRequest.objects
     serializer_class = RecipeBookEntryChangeRequestSerializer
-    permission_classes = [(CustomIsOwner | (CustomIsShared & IsReadOnlyDRF)) & CustomTokenHasReadWriteScope]
+    permission_classes = [(CustomIsOwner | (CustomIsShared & IsCreateOrWithdrawOrResubmitDRF)) & CustomTokenHasReadWriteScope]
     pagination_class = DefaultPagination
 
     def get_queryset(self):
@@ -1602,6 +1602,62 @@ class RecipeBookEntryChangeRequestViewSet(LoggingMixin, viewsets.ModelViewSet):
         change_request.save()
 
         return Response(RecipeBookEntryChangeRequestSerializer(change_request, context={'request': request}).data)
+
+    @decorators.action(detail=True, methods=['post'], serializer_class=RecipeBookChangeRequestResubmitSerializer)
+    def resubmit(self, request, pk=None):
+        change_request = self.get_object()
+        user = request.user
+
+        if change_request.status != RecipeBookEntryChangeRequest.STATUS_WITHDRAWN:
+            return Response(
+                {'detail': _('Only withdrawn change requests can be resubmitted.')},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if change_request.created_by != user:
+            raise PermissionDenied(_('Only the creator can resubmit their own change request.'))
+
+        if RecipeBookEntryChangeRequest.objects.filter(
+            book=change_request.book,
+            recipe=change_request.recipe,
+            action=change_request.action,
+            status=RecipeBookEntryChangeRequest.STATUS_PENDING
+        ).exists():
+            return Response(
+                {'detail': _('A pending change request for this recipe and action already exists.')},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if change_request.action == RecipeBookEntryChangeRequest.ACTION_REMOVE:
+            if not RecipeBookEntry.objects.filter(book=change_request.book, recipe=change_request.recipe).exists():
+                return Response(
+                    {'detail': _('Recipe is not in this book, cannot request removal.')},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        if change_request.action == RecipeBookEntryChangeRequest.ACTION_ADD:
+            if RecipeBookEntry.objects.filter(book=change_request.book, recipe=change_request.recipe).exists():
+                return Response(
+                    {'detail': _('Recipe is already in this book.')},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        note = serializer.validated_data.get('note', change_request.note)
+
+        new_request = RecipeBookEntryChangeRequest.objects.create(
+            book=change_request.book,
+            recipe=change_request.recipe,
+            action=change_request.action,
+            note=note,
+            created_by=user,
+        )
+
+        return Response(
+            RecipeBookEntryChangeRequestSerializer(new_request, context={'request': request}).data,
+            status=status.HTTP_201_CREATED
+        )
 
 
 class CalendarRenderer(BaseRenderer):

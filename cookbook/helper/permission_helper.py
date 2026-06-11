@@ -552,6 +552,15 @@ class IsCreateDRF(permissions.BasePermission):
         return request.method == 'POST'
 
 
+class IsCreateOrWithdrawOrResubmitDRF(permissions.BasePermission):
+    message = 'You cannot interact with this object, you can only create, withdraw or resubmit'
+
+    def has_permission(self, request, view):
+        if request.method == 'POST':
+            return True
+        return request.method in SAFE_METHODS
+
+
 def create_space_for_user(user, name=None):
     with scopes_disabled():
         if not name:

@@ -1399,6 +1399,7 @@ class RecipeBookEntryChangeRequestSerializer(serializers.ModelSerializer):
     recipe_content = serializers.SerializerMethodField(method_name='get_recipe_content', read_only=True)
     is_creator = serializers.SerializerMethodField()
     is_book_owner = serializers.SerializerMethodField()
+    can_resubmit = serializers.SerializerMethodField()
 
     @extend_schema_field(RecipeBookSerializer)
     def get_book_content(self, obj):
@@ -1421,6 +1422,22 @@ class RecipeBookEntryChangeRequestSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated:
             return False
         return obj.book.get_owner() == request.user
+
+    @extend_schema_field(bool)
+    def get_can_resubmit(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        if obj.status != RecipeBookEntryChangeRequest.STATUS_WITHDRAWN:
+            return False
+        if obj.created_by != request.user:
+            return False
+        return not RecipeBookEntryChangeRequest.objects.filter(
+            book=obj.book,
+            recipe=obj.recipe,
+            action=obj.action,
+            status=RecipeBookEntryChangeRequest.STATUS_PENDING
+        ).exists()
 
     def validate(self, attrs):
         user = self.context['request'].user
@@ -1458,12 +1475,16 @@ class RecipeBookEntryChangeRequestSerializer(serializers.ModelSerializer):
         model = RecipeBookEntryChangeRequest
         fields = ('id', 'book', 'book_content', 'recipe', 'recipe_content', 'action',
                   'status', 'note', 'created_by', 'reviewed_by', 'review_note',
-                  'created_at', 'updated_at', 'reviewed_at', 'is_creator', 'is_book_owner')
-        read_only_fields = ('created_by', 'reviewed_by', 'status', 'created_at', 'updated_at', 'reviewed_at', 'is_creator', 'is_book_owner')
+                  'created_at', 'updated_at', 'reviewed_at', 'is_creator', 'is_book_owner', 'can_resubmit')
+        read_only_fields = ('created_by', 'reviewed_by', 'status', 'created_at', 'updated_at', 'reviewed_at', 'is_creator', 'is_book_owner', 'can_resubmit')
 
 
 class RecipeBookChangeRequestReviewSerializer(serializers.Serializer):
     review_note = serializers.CharField(required=False, allow_blank=True)
+
+
+class RecipeBookChangeRequestResubmitSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True)
 
 
 class MealPlanSerializer(SpacedModelSerializer, WritableNestedModelSerializer):

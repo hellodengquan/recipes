@@ -168,6 +168,12 @@
                                     </v-btn>
                                 </template>
                             </template>
+                            <template v-else-if="item.status === 'WITHDRAWN' && item.canResubmit && item.isCreator">
+                                <v-btn size="small" color="primary" variant="flat" @click="openResubmitDialog(item)">
+                                    <v-icon start icon="$refresh"></v-icon>
+                                    {{ $t('Resubmit') }}
+                                </v-btn>
+                            </template>
                             <template v-else>
                                 <span class="text-grey text-caption">{{ $t('Status' + item.status) }}</span>
                             </template>
@@ -179,6 +185,42 @@
             </v-tabs-window>
         </v-card-text>
     </model-editor-base>
+
+    <v-dialog v-model="resubmitDialogVisible" width="500">
+        <v-card>
+            <v-card-title>{{ $t('ResubmitChangeRequest') }}</v-card-title>
+            <v-card-text>
+                <v-row>
+                    <v-col cols="12">
+                        <v-chip
+                            :color="resubmittingItem?.action === 'ADD' ? 'success' : 'warning'"
+                            size="small"
+                            variant="outlined"
+                        >
+                            {{ resubmittingItem?.action === 'ADD' ? $t('AddRecipe') : $t('RemoveRecipe') }}
+                        </v-chip>
+                        <span class="ms-2 fw-bold">{{ resubmittingItem?.recipeContent.name }}</span>
+                    </v-col>
+                    <v-col cols="12">
+                        <v-textarea
+                            v-model="resubmitNote"
+                            :label="$t('RequestNote')"
+                            :placeholder="$t('RequestNotePlaceholder')"
+                            rows="4"
+                        ></v-textarea>
+                    </v-col>
+                </v-row>
+            </v-card-text>
+            <v-card-actions>
+                <v-spacer></v-spacer>
+                <v-btn variant="text" @click="resubmitDialogVisible = false">{{ $t('Cancel') }}</v-btn>
+                <v-btn color="primary" @click="confirmResubmit" :disabled="resubmitLoading">
+                    <v-icon start icon="$refresh"></v-icon>
+                    {{ $t('Resubmit') }}
+                </v-btn>
+            </v-card-actions>
+        </v-card>
+    </v-dialog>
 </template>
 
 <script setup lang="ts">
@@ -203,6 +245,7 @@ interface ChangeRequestItem {
     note: string
     isCreator: boolean
     isBookOwner: boolean
+    canResubmit: boolean
     recipeContent: { name: string; id: number }
     createdBy: { id: number; displayName: string } | null
     reviewedBy: { id: number; displayName: string } | null
@@ -232,6 +275,11 @@ const changeRequests = ref([] as ChangeRequestItem[])
 
 const selectedRecipe = ref({} as Recipe)
 const addRequestNote = ref('')
+
+const resubmitDialogVisible = ref(false)
+const resubmittingItem = ref<ChangeRequestItem | null>(null)
+const resubmitNote = ref('')
+const resubmitLoading = ref(false)
 
 const tablePage = ref(1)
 const itemCount = ref(0)
@@ -297,6 +345,7 @@ function mapChangeRequest(raw: any): ChangeRequestItem {
         note: raw.note || '',
         isCreator: raw.is_creator === true,
         isBookOwner: raw.is_book_owner === true,
+        canResubmit: raw.can_resubmit === true,
         recipeContent: raw.recipe_content
             ? {name: raw.recipe_content.name || '', id: raw.recipe_content.id}
             : {name: '', id: 0},
@@ -476,6 +525,45 @@ function refreshEditingObj() {
     let api = new ApiApi()
     api.apiRecipeBookRead({id: editingObj.value.id}).then(r => {
         editingObj.value = r
+    })
+}
+
+function openResubmitDialog(item: ChangeRequestItem) {
+    resubmittingItem.value = item
+    resubmitNote.value = item.note || ''
+    resubmitDialogVisible.value = true
+}
+
+function confirmResubmit() {
+    if (!resubmittingItem.value || !editingObj.value.id) return
+
+    resubmitLoading.value = true
+
+    fetch(`/api/recipe-book-entry-change-request/${resubmittingItem.value.id}/resubmit/`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken') || '',
+        },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+            note: resubmitNote.value,
+        })
+    }).then(response => {
+        if (!response.ok) throw response
+        return response.json()
+    }).then(() => {
+        useMessageStore().addPreparedMessage(PreparedMessage.CREATE_SUCCESS)
+        resubmitDialogVisible.value = false
+        resubmittingItem.value = null
+        resubmitNote.value = ''
+        loadRecipeBookEntries({page: tablePage.value, itemsPerPage: 10, sortBy: [], groupBy: [], search: ''})
+        loadChangeRequests({page: 1, itemsPerPage: 10, sortBy: [], groupBy: [], search: ''})
+        refreshEditingObj()
+    }).catch(err => {
+        useMessageStore().addError(ErrorMessageType.CREATE_ERROR, err)
+    }).finally(() => {
+        resubmitLoading.value = false
     })
 }
 

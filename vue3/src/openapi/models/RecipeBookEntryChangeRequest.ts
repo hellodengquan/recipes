@@ -124,6 +124,7 @@ export interface RecipeBookEntryChangeRequest {
     readonly reviewedAt?: Date | null;
     readonly isCreator?: boolean;
     readonly isBookOwner?: boolean;
+    readonly canResubmit?: boolean;
 }
 
 /**
@@ -182,6 +183,7 @@ export function RecipeBookEntryChangeRequestFromJSONTyped(json: any, ignoreDiscr
         'reviewedAt': json['reviewed_at'] == null ? undefined : (json['reviewed_at'] == null ? null : new Date(json['reviewed_at'])),
         'isCreator': json['is_creator'] == null ? undefined : json['is_creator'],
         'isBookOwner': json['is_book_owner'] == null ? undefined : json['is_book_owner'],
+        'canResubmit': json['can_resubmit'] == null ? undefined : json['can_resubmit'],
     };
 }
 
