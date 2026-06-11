@@ -140,22 +140,29 @@
                             <tbody>
                                 <tr v-for="item in items" :key="`${item.ingredient_id}-${item.recipe_id}`">
                                     <td>
-                                        <div class="font-weight-medium">{{ item.food.name }}</div>
+                                        <div class="font-weight-medium">{{ item.food?.name || item.original_text }}</div>
                                         <div class="text-body-2 text-medium-emphasis">
                                             {{ item.original_text }}
                                         </div>
-                                        <v-chip size="x-small" variant="tonal" color="info" class="mt-1" v-if="item.food.fdc_id">
+                                        <v-chip size="x-small" variant="tonal" color="info" class="mt-1" v-if="item.food?.fdc_id">
                                             FDC: {{ item.food.fdc_id }}
                                         </v-chip>
-                                    </td>
-                                    <td>
-                                        <v-chip variant="outlined">
-                                            {{ item.amount }}
+                                        <v-chip size="x-small" variant="tonal" color="error" class="mt-1" v-if="!item.food">
+                                            {{ $t('NutritionReview_MissingFood') }}
                                         </v-chip>
                                     </td>
                                     <td>
-                                        <v-chip variant="outlined" color="secondary">
+                                        <v-chip variant="outlined" v-if="item.amount">
+                                            {{ item.amount }}
+                                        </v-chip>
+                                        <span v-else class="text-medium-emphasis">-</span>
+                                    </td>
+                                    <td>
+                                        <v-chip variant="outlined" color="secondary" v-if="item.unit">
                                             {{ item.unit.name }}
+                                        </v-chip>
+                                        <v-chip size="x-small" variant="tonal" color="warning" v-else>
+                                            {{ $t('NutritionReview_MissingUnit') }}
                                         </v-chip>
                                     </td>
                                     <td>
@@ -250,9 +257,9 @@
                         class="mb-4"
                     >
                         <template v-if="actionDialog.item">
-                            <strong>{{ actionDialog.item.food.name }}</strong>
+                            <strong>{{ actionDialog.item.food?.name || actionDialog.item.original_text }}</strong>
                             <span class="text-medium-emphasis">
-                                ({{ actionDialog.item.amount }} {{ actionDialog.item.unit.name }})
+                                ({{ actionDialog.item.amount || '-' }} {{ actionDialog.item.unit?.name || '-' }})
                             </span>
                         </template>
                     </v-alert>
@@ -345,13 +352,13 @@ const groupedItems = computed(() => {
         let key = ''
         switch (selectedGroupBy.value) {
             case 'food':
-                key = `food_${item.food.id}`
+                key = item.food ? `food_${item.food.id}` : 'food_unknown'
                 break
             case 'recipe':
                 key = `recipe_${item.recipe_id || 'unknown'}`
                 break
             case 'unit':
-                key = `unit_${item.unit.id}`
+                key = item.unit ? `unit_${item.unit.id}` : 'unit_unknown'
                 break
         }
 
@@ -419,11 +426,11 @@ function getGroupTitle(key: string, items: NutritionReviewItem[]): string {
     const first = items[0]
     switch (selectedGroupBy.value) {
         case 'food':
-            return first.food.name
+            return first.food?.name || first.original_text || t('NutritionReview_UnknownFood')
         case 'recipe':
-            return first.recipe_name || `Recipe #${first.recipe_id}`
+            return first.recipe_name || `${t('NutritionReview_Recipe')} #${first.recipe_id}`
         case 'unit':
-            return first.unit.name
+            return first.unit?.name || t('NutritionReview_UnknownUnit')
         default:
             return key
     }
@@ -479,19 +486,12 @@ async function loadSummary() {
 async function loadPendingReviews() {
     loadingList.value = true
     try {
-        const result = await NutritionReviewService.getPendingReviews()
-        reviewItems.value = result.results.flatMap(r => {
-            return []
-        })
+        const filter = CONFIDENCE_FILTERS.find(f => f.value === selectedConfidenceFilter.value)
+        const params = filter && filter.value !== 'all'
+            ? { confidence_min: filter.min, confidence_max: filter.max }
+            : undefined
 
-        if (result.results.length > 0 && result.results[0].recipe_id) {
-            const firstId = result.results[0].recipe_id
-            try {
-                const detail = await NutritionReviewService.getRecipeReview(firstId)
-                reviewItems.value = detail.review_items || []
-            } catch {
-            }
-        }
+        reviewItems.value = await NutritionReviewService.getAllPendingReviewItems(params)
     } catch (err) {
         useMessageStore().addError(ErrorMessageType.FETCH_ERROR, err)
     } finally {

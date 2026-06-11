@@ -3,7 +3,7 @@ import type {
     NutritionReviewResult,
     NutritionReviewSummary,
     NutritionPendingReviewItem,
-    NutritionReviewActionRequest,
+    NutritionReviewItem,
 } from '@/types/NutritionReview'
 
 const BASE_URL = '/api'
@@ -33,34 +33,55 @@ export const NutritionReviewService = {
         return handleResponse<NutritionReviewResult>(response)
     },
 
-    async flagRecipeForReview(recipeId: number, data?: NutritionReviewActionRequest): Promise<NutritionReviewResult> {
+    async flagRecipeForReview(recipeId: number, data?: { comment?: string; reason?: string; confidence_score?: number }): Promise<NutritionReviewResult> {
+        const body: Record<string, unknown> = {}
+        if (data?.comment !== undefined) {
+            body.reason = data.comment
+        }
+        if (data?.reason !== undefined) {
+            body.reason = data.reason
+        }
+        if (data?.confidence_score !== undefined) {
+            body.confidence_score = data.confidence_score
+        }
+
         const response = await fetch(`${BASE_URL}/recipe/${recipeId}/nutrition_flag/`, {
             method: 'POST',
             headers: getHeaders(),
             credentials: 'same-origin',
-            body: data ? JSON.stringify(data) : undefined,
+            body: Object.keys(body).length > 0 ? JSON.stringify(body) : undefined,
         })
-        return handleResponse<NutritionReviewResult>(response)
+
+        const result = await handleResponse<Record<string, unknown>>(response)
+        return this.getRecipeReview(recipeId)
     },
 
-    async approveRecipeNutrition(recipeId: number, data?: NutritionReviewActionRequest): Promise<NutritionReviewResult> {
+    async approveRecipeNutrition(recipeId: number, data?: { comment?: string }): Promise<NutritionReviewResult> {
+        const body = data?.comment ? JSON.stringify({ comment: data.comment }) : undefined
+
         const response = await fetch(`${BASE_URL}/recipe/${recipeId}/nutrition_approve/`, {
             method: 'POST',
             headers: getHeaders(),
             credentials: 'same-origin',
-            body: data ? JSON.stringify(data) : undefined,
+            body,
         })
-        return handleResponse<NutritionReviewResult>(response)
+
+        await handleResponse<Record<string, unknown>>(response)
+        return this.getRecipeReview(recipeId)
     },
 
-    async rejectRecipeNutrition(recipeId: number, data?: NutritionReviewActionRequest): Promise<NutritionReviewResult> {
+    async rejectRecipeNutrition(recipeId: number, data?: { comment?: string }): Promise<NutritionReviewResult> {
+        const body = data?.comment ? JSON.stringify({ comment: data.comment }) : undefined
+
         const response = await fetch(`${BASE_URL}/recipe/${recipeId}/nutrition_reject/`, {
             method: 'POST',
             headers: getHeaders(),
             credentials: 'same-origin',
-            body: data ? JSON.stringify(data) : undefined,
+            body,
         })
-        return handleResponse<NutritionReviewResult>(response)
+
+        await handleResponse<Record<string, unknown>>(response)
+        return this.getRecipeReview(recipeId)
     },
 
     async getReviewSummary(): Promise<NutritionReviewSummary> {
@@ -104,6 +125,37 @@ export const NutritionReviewService = {
             next?: string
             previous?: string
         }>(response)
+    },
+
+    async getAllPendingReviewItems(params?: {
+        confidence_min?: number
+        confidence_max?: number
+    }): Promise<NutritionReviewItem[]> {
+        const pending = await this.getPendingReviews({
+            page_size: 100,
+            confidence_min: params?.confidence_min,
+            confidence_max: params?.confidence_max,
+        })
+
+        const allItems: NutritionReviewItem[] = []
+
+        for (const pendingItem of pending.results) {
+            if (!pendingItem.recipe_id) continue
+
+            try {
+                const detail = await this.getRecipeReview(pendingItem.recipe_id)
+                const itemsWithRecipe = detail.review_items.map(item => ({
+                    ...item,
+                    recipe_id: pendingItem.recipe_id,
+                    recipe_name: pendingItem.recipe_name,
+                }))
+                allItems.push(...itemsWithRecipe)
+            } catch (err) {
+                console.error(`Failed to load review for recipe ${pendingItem.recipe_id}:`, err)
+            }
+        }
+
+        return allItems
     },
 }
 

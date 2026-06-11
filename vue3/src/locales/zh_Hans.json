@@ -1043,5 +1043,9 @@
     "NutritionReview_GroupBy": "分组方式",
     "NutritionReview_GroupByFood": "按食材分组",
     "NutritionReview_GroupByRecipe": "按食谱分组",
-    "NutritionReview_GroupByUnit": "按单位分组"
+    "NutritionReview_GroupByUnit": "按单位分组",
+    "NutritionReview_MissingFood": "缺少食材",
+    "NutritionReview_MissingUnit": "缺少单位",
+    "NutritionReview_UnknownFood": "未知食材",
+    "NutritionReview_UnknownUnit": "未知单位"
 }

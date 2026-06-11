@@ -1040,5 +1040,9 @@
   "NutritionReview_GroupBy": "Group By",
   "NutritionReview_GroupByFood": "Group by Food",
   "NutritionReview_GroupByRecipe": "Group by Recipe",
-  "NutritionReview_GroupByUnit": "Group by Unit"
+  "NutritionReview_GroupByUnit": "Group by Unit",
+  "NutritionReview_MissingFood": "Missing Food",
+  "NutritionReview_MissingUnit": "Missing Unit",
+  "NutritionReview_UnknownFood": "Unknown Food",
+  "NutritionReview_UnknownUnit": "Unknown Unit"
 }

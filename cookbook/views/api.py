@@ -3488,10 +3488,33 @@ class NutritionReviewSummaryView(APIView):
         role_info = get_nutrition_role_permissions(request.user, request.space)
 
         from cookbook.helper.permission_config import PermissionConfig
+        from django.db.models import Avg, Count, Q
+
+        qs = NutritionInformation.objects.filter(space=request.space)
+
+        avg_confidence = qs.aggregate(avg=Avg('confidence_score'))['avg'] or 0
+
+        low_conf_count = qs.filter(
+            confidence_score__lt=Decimal('70.00')
+        ).count()
+
+        missing_data_count = qs.filter(
+            Q(missing_ingredients__len__gt=0) | Q(low_confidence_ingredients__len__gt=0)
+        ).count() if hasattr(qs.first(), 'missing_ingredients') else 0
+
+        total_recipes = qs.exclude(recipe=None).count()
+
         return Response({
-            'summary': summary,
-            'role': role_info['role'],
-            'permissions': role_info['permissions'],
+            'total_recipes': total_recipes,
+            'pending_review': summary.get('pending', 0),
+            'approved': summary.get('approved', 0),
+            'rejected': summary.get('rejected', 0),
+            'auto_approved': summary.get('auto_approved', 0),
+            'average_confidence': str(round(avg_confidence, 2)),
+            'current_user_role': role_info['role'],
+            'user_permissions': role_info['permissions'],
+            'low_confidence_count': low_conf_count,
+            'missing_data_count': summary.get('needs_review', 0),
             'role_matrix': PermissionConfig.NUTRITION_ROLE_MATRIX,
         }, status=status.HTTP_200_OK)
 
@@ -3508,8 +3531,62 @@ class NutritionReviewPendingView(APIView):
         if not role_info['permissions'].get('view_all_pending', False):
             qs = qs.filter(recipe__created_by=request.user)
 
-        from cookbook.serializer import NutritionInformationSerializer
+        confidence_min = request.query_params.get('confidence_min', None)
+        confidence_max = request.query_params.get('confidence_max', None)
+        review_status = request.query_params.get('review_status', None)
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 20))
+
+        if confidence_min is not None:
+            qs = qs.filter(confidence_score__gte=Decimal(confidence_min))
+        if confidence_max is not None:
+            qs = qs.filter(confidence_score__lt=Decimal(confidence_max))
+        if review_status:
+            qs = qs.filter(review_status=review_status)
+
+        total_count = qs.count()
+
+        start = (page - 1) * page_size
+        end = start + page_size
+        qs_page = qs[start:end]
+
+        results = []
+        for nutr_info in qs_page:
+            recipe = getattr(nutr_info, 'recipe_set', None)
+            if recipe and recipe.exists():
+                recipe_obj = recipe.first()
+            else:
+                recipe_obj = None
+
+            missing_count = len(nutr_info.missing_ingredients) if nutr_info.missing_ingredients else 0
+            low_conf_count = len(nutr_info.low_confidence_ingredients) if nutr_info.low_confidence_ingredients else 0
+
+            reviewed_by = None
+            if nutr_info.reviewed_by:
+                reviewed_by = {
+                    'id': nutr_info.reviewed_by.id,
+                    'name': nutr_info.reviewed_by.get_full_name() or nutr_info.reviewed_by.username,
+                }
+
+            results.append({
+                'id': nutr_info.id,
+                'recipe_id': recipe_obj.id if recipe_obj else None,
+                'recipe_name': recipe_obj.name if recipe_obj else None,
+                'recipe_image': recipe_obj.image.url if recipe_obj and recipe_obj.image else None,
+                'confidence_score': str(nutr_info.confidence_score),
+                'needs_review': nutr_info.needs_review,
+                'review_status': nutr_info.review_status,
+                'missing_ingredients': missing_count,
+                'low_confidence_ingredients': low_conf_count,
+                'review_comment': nutr_info.review_comment,
+                'reviewed_by': reviewed_by,
+                'reviewed_at': nutr_info.reviewed_at.isoformat() if nutr_info.reviewed_at else None,
+                'created_at': nutr_info.created_at.isoformat() if hasattr(nutr_info, 'created_at') and nutr_info.created_at else None,
+            })
+
         return Response({
-            'count': qs.count(),
-            'results': NutritionInformationSerializer(qs, many=True, context={'request': request}).data,
+            'count': total_count,
+            'results': results,
+            'next': None,
+            'previous': None,
         }, status=status.HTTP_200_OK)

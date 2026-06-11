@@ -24,17 +24,18 @@ export interface NutritionReviewItem {
         id: number
         name: string
         fdc_id?: number
-    }
-    amount: number
+    } | null
+    amount: string | number | null
     unit: {
         id: number
         name: string
-    }
+    } | null
     confidence_score: string
     review_reasons: string[]
     review_reasons_text: string[]
     recipe_id?: number
     recipe_name?: string
+    needs_review?: boolean
 }
 
 export interface NutritionReviewResult {
