@@ -419,7 +419,6 @@ class Command(BaseCommand):
             try:
                 space = Space.objects.get(name=space_name)
                 space.safe_delete()
-                space.delete()
                 self.stdout.write(f'  Deleted space: {space_name}')
             except Space.DoesNotExist:
                 pass
@@ -477,9 +476,9 @@ class Command(BaseCommand):
             self.stdout.write(f'  Created recipe: {recipe_config["name"]}')
             self._populate_recipe_steps(recipe, recipe_config, space, keywords, foods, units)
 
-        for kw_name in recipe_config['keywords']:
-            if kw_name in keywords:
-                recipe.keywords.add(keywords[kw_name])
+            for kw_name in recipe_config['keywords']:
+                if kw_name in keywords:
+                    recipe.keywords.add(keywords[kw_name])
 
         return recipe
 
