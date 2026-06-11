@@ -4,6 +4,7 @@ import re
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
+from enum import Enum
 
 import oauth2_provider.models
 from annoying.fields import AutoOneToOneField
@@ -751,10 +752,13 @@ class Unit(ExportModelOperationsMixin('unit'), models.Model, PermissionModelMixi
     space = models.ForeignKey(Space, on_delete=models.CASCADE)
     objects = ScopedManager(space='space')
 
-    def merge_into(self, target):
+    def merge_into(self, target, created_by=None):
         super().merge_into(target)
 
         conversion_factor = self._get_conversion_factor(target)
+        source_unit_id = self.id
+        target_unit_id = target.id
+        space = self.space
 
         with scopes_disabled():
             if conversion_factor != 1:
@@ -775,8 +779,13 @@ class Unit(ExportModelOperationsMixin('unit'), models.Model, PermissionModelMixi
         Food.objects.filter(preferred_unit=self).update(preferred_unit=target)
         Food.objects.filter(preferred_shopping_unit=self).update(preferred_shopping_unit=target)
 
-        self._clear_unit_caches()
-        target._clear_unit_caches()
+        from cookbook.helper.async_cache_refresher import AsyncCacheRefresher
+        AsyncCacheRefresher.submit_unit_merge_refresh(
+            space=space,
+            source_unit_id=source_unit_id,
+            target_unit_id=target_unit_id,
+            created_by=created_by,
+        )
 
         self.delete()
         return target
@@ -1804,3 +1813,88 @@ class CustomFilter(models.Model, PermissionModelMixin):
             models.UniqueConstraint(fields=['space', 'name'], name='cf_unique_name_per_space')
         ]
         ordering = ('pk',)
+
+
+class CacheRefreshStatus(Enum):
+    PENDING = 'PENDING'
+    RUNNING = 'RUNNING'
+    COMPLETED = 'COMPLETED'
+    FAILED = 'FAILED'
+
+
+class CacheRefreshType(Enum):
+    UNIT_MERGE = 'UNIT_MERGE'
+    UNIT_DELETE = 'UNIT_DELETE'
+    UNIT_SAVE = 'UNIT_SAVE'
+
+
+class CacheRefreshTask(models.Model, PermissionModelMixin):
+    STATUS_CHOICES = (
+        (CacheRefreshStatus.PENDING.value, _('Pending')),
+        (CacheRefreshStatus.RUNNING.value, _('Running')),
+        (CacheRefreshStatus.COMPLETED.value, _('Completed')),
+        (CacheRefreshStatus.FAILED.value, _('Failed')),
+    )
+
+    TYPE_CHOICES = (
+        (CacheRefreshType.UNIT_MERGE.value, _('Unit Merge')),
+        (CacheRefreshType.UNIT_DELETE.value, _('Unit Delete')),
+        (CacheRefreshType.UNIT_SAVE.value, _('Unit Save')),
+    )
+
+    task_type = models.CharField(max_length=32, choices=TYPE_CHOICES)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=CacheRefreshStatus.PENDING.value)
+    message = models.TextField(default='', blank=True)
+
+    source_unit_id = models.IntegerField(null=True, blank=True)
+    target_unit_id = models.IntegerField(null=True, blank=True)
+
+    total_items = models.IntegerField(default=0)
+    processed_items = models.IntegerField(default=0)
+    batch_size = models.IntegerField(default=100)
+    batch_count = models.IntegerField(default=0)
+
+    error_message = models.TextField(default='', blank=True)
+
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+
+    space = models.ForeignKey(Space, on_delete=models.CASCADE)
+    objects = ScopedManager(space='space')
+
+    def __str__(self):
+        return f"{self.task_type} - {self.status} ({self.processed_items}/{self.total_items})"
+
+    class Meta:
+        ordering = ('-created_at',)
+        indexes = (
+            Index(fields=['space', 'status']),
+            Index(fields=['-created_at']),
+        )
+
+    def update_progress(self, processed_batch_count=0):
+        if processed_batch_count > 0:
+            self.processed_items += processed_batch_count
+            self.batch_count += 1
+        if self.total_items > 0:
+            self.save(update_fields=['processed_items', 'batch_count'])
+
+    def mark_running(self):
+        self.status = CacheRefreshStatus.RUNNING.value
+        self.started_at = timezone.now()
+        self.save(update_fields=['status', 'started_at'])
+
+    def mark_completed(self, message=''):
+        self.status = CacheRefreshStatus.COMPLETED.value
+        self.completed_at = timezone.now()
+        self.message = message
+        self.save(update_fields=['status', 'completed_at', 'message'])
+
+    def mark_failed(self, error_message=''):
+        self.status = CacheRefreshStatus.FAILED.value
+        self.completed_at = timezone.now()
+        self.error_message = error_message
+        self.save(update_fields=['status', 'completed_at', 'error_message'])

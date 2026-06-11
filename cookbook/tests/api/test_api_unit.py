@@ -1,5 +1,6 @@
 import json
 import pytest
+import time
 import uuid
 from decimal import Decimal
 
@@ -8,9 +9,10 @@ from django.core.cache import caches
 from django.urls import reverse
 from django_scopes import scopes_disabled
 
+from cookbook.helper.async_cache_refresher import AsyncCacheRefresher, RefreshWork
 from cookbook.helper.cache_helper import CacheHelper
 from cookbook.helper.unit_conversion_helper import UnitConversionHelper
-from cookbook.models import Food, Ingredient, ShoppingListEntry, Unit, UnitConversion
+from cookbook.models import CacheRefreshStatus, CacheRefreshTask, CacheRefreshType, Food, Ingredient, ShoppingListEntry, Unit, UnitConversion
 
 LIST_URL = 'api:unit-list'
 DETAIL_URL = 'api:unit-detail'
@@ -558,3 +560,231 @@ def test_cache_helper_clear_unit_related_caches(space_1):
         assert caches['default'].get(cache_helper.BASE_UNITS_CACHE_KEY) is None
         assert caches['default'].get(cache_helper.PROPERTY_TYPE_CACHE_KEY) is None
         assert space_1.id not in UnitConversionHelper._base_units_cache
+
+
+def wait_for_async_task(task_id, timeout=10):
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        with scopes_disabled():
+            task = CacheRefreshTask.objects.filter(pk=task_id).first()
+            if task and task.status in [CacheRefreshStatus.COMPLETED.value, CacheRefreshStatus.FAILED.value]:
+                return task
+        time.sleep(0.1)
+    return None
+
+
+def test_merge_creates_async_refresh_task(u1_s1, space_1, unit_gram, unit_kg):
+    with scopes_disabled():
+        initial_task_count = CacheRefreshTask.objects.filter(space=space_1).count()
+
+    url = reverse(MERGE_URL, args=[unit_gram.id, unit_kg.id])
+    r = u1_s1.put(url)
+    assert r.status_code == 200
+
+    with scopes_disabled():
+        task = CacheRefreshTask.objects.filter(
+            space=space_1,
+            task_type=CacheRefreshType.UNIT_MERGE.value
+        ).order_by('-created_at').first()
+
+        assert task is not None
+        assert task.source_unit_id == unit_gram.id
+        assert task.target_unit_id == unit_kg.id
+        assert CacheRefreshTask.objects.filter(space=space_1).count() == initial_task_count + 1
+
+
+def test_merge_backfills_and_async_refreshes(u1_s1, space_1, unit_gram, unit_kg, recipe_1_s1):
+    with scopes_disabled():
+        user = auth.get_user(u1_s1)
+        food = random_food(space_1, u1_s1)
+        step = recipe_1_s1.steps.first()
+        ingredient = Ingredient.objects.create(
+            food=food,
+            unit=unit_gram,
+            amount=Decimal('3000'),
+            step=step,
+            space=space_1
+        )
+        shopping_entry = ShoppingListEntry.objects.create(
+            food=food,
+            unit=unit_gram,
+            amount=Decimal('500'),
+            created_by=user,
+            space=space_1
+        )
+
+        cache_helper = CacheHelper(space_1)
+        caches['default'].set(cache_helper.BASE_UNITS_CACHE_KEY, ['old_data'], 60)
+        caches['default'].set(cache_helper.PROPERTY_TYPE_CACHE_KEY, ['old_property_data'], 60)
+        UnitConversionHelper._base_units_cache[space_1.id] = ['old_data']
+
+    url = reverse(MERGE_URL, args=[unit_gram.id, unit_kg.id])
+    r = u1_s1.put(url)
+    assert r.status_code == 200
+
+    with scopes_disabled():
+        ingredient.refresh_from_db()
+        shopping_entry.refresh_from_db()
+
+        assert ingredient.unit == unit_kg
+        assert abs(ingredient.amount - Decimal('3')) < Decimal('0.0001')
+        assert shopping_entry.unit == unit_kg
+        assert abs(shopping_entry.amount - Decimal('0.5')) < Decimal('0.0001')
+
+        task = CacheRefreshTask.objects.filter(
+            space=space_1,
+            task_type=CacheRefreshType.UNIT_MERGE.value
+        ).order_by('-created_at').first()
+
+        assert task is not None
+        completed_task = wait_for_async_task(task.id, timeout=15)
+        assert completed_task is not None
+        assert completed_task.status == CacheRefreshStatus.COMPLETED.value
+        assert completed_task.processed_items >= 2
+        assert completed_task.batch_count >= 1
+
+        assert caches['default'].get(cache_helper.BASE_UNITS_CACHE_KEY) is None
+        assert caches['default'].get(cache_helper.PROPERTY_TYPE_CACHE_KEY) is None
+        assert space_1.id not in UnitConversionHelper._base_units_cache
+
+
+def test_async_refresh_batched_execution(space_1):
+    import logging
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        test_cache_keys = []
+        for i in range(50):
+            key = f'{cache_helper.DELETE_COLLECTOR_CACHE_PREFIX}PROTECTING_Unit_{i}'
+            caches['default'].set(key, f'data_{i}', 60)
+            test_cache_keys.append(key)
+
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=1,
+            batch_size=10,
+            space=space_1,
+        )
+
+        cache_patterns = test_cache_keys
+
+        work = RefreshWork(task=task, cache_patterns=cache_patterns)
+        AsyncCacheRefresher.process_refresh_work(work, logging.getLogger('test'))
+
+        task.refresh_from_db()
+        assert task.status == CacheRefreshStatus.COMPLETED.value
+        assert task.total_items >= 50
+        assert task.processed_items >= 50
+        assert task.batch_count >= 5
+
+        for key in test_cache_keys:
+            assert caches['default'].get(key) is None
+
+
+def test_cache_refresh_task_progress_tracking(space_1):
+    with scopes_disabled():
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=1,
+            total_items=100,
+            batch_size=20,
+            space=space_1,
+        )
+
+        assert task.status == CacheRefreshStatus.PENDING.value
+        assert task.processed_items == 0
+        assert task.batch_count == 0
+        assert task.started_at is None
+        assert task.completed_at is None
+
+        task.mark_running()
+        task.refresh_from_db()
+        assert task.status == CacheRefreshStatus.RUNNING.value
+        assert task.started_at is not None
+
+        task.update_progress(processed_batch_count=20)
+        task.refresh_from_db()
+        assert task.processed_items == 20
+        assert task.batch_count == 1
+
+        task.update_progress(processed_batch_count=20)
+        task.refresh_from_db()
+        assert task.processed_items == 40
+        assert task.batch_count == 2
+
+        task.mark_completed('test completed')
+        task.refresh_from_db()
+        assert task.status == CacheRefreshStatus.COMPLETED.value
+        assert task.completed_at is not None
+        assert task.message == 'test completed'
+
+
+def test_cache_refresh_task_error_handling(space_1):
+    with scopes_disabled():
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_SAVE.value,
+            source_unit_id=1,
+            space=space_1,
+        )
+
+        task.mark_running()
+        task.refresh_from_db()
+        assert task.status == CacheRefreshStatus.RUNNING.value
+
+        task.mark_failed('test error')
+        task.refresh_from_db()
+        assert task.status == CacheRefreshStatus.FAILED.value
+        assert task.error_message == 'test error'
+        assert task.completed_at is not None
+
+
+def test_async_refresh_with_small_batch_size(space_1):
+    import logging
+    with scopes_disabled():
+        cache_helper = CacheHelper(space_1)
+        test_cache_keys = []
+        for i in range(25):
+            key = f'{cache_helper.DELETE_COLLECTOR_CACHE_PREFIX}CASCADING_Ingredient_{i}'
+            caches['default'].set(key, f'data_{i}', 60)
+            test_cache_keys.append(key)
+
+        task = CacheRefreshTask.objects.create(
+            task_type=CacheRefreshType.UNIT_DELETE.value,
+            source_unit_id=1,
+            batch_size=5,
+            space=space_1,
+        )
+
+        cache_patterns = test_cache_keys
+
+        work = RefreshWork(task=task, cache_patterns=cache_patterns)
+        AsyncCacheRefresher.process_refresh_work(work, logging.getLogger('test'))
+
+        task.refresh_from_db()
+        assert task.status == CacheRefreshStatus.COMPLETED.value
+        assert task.total_items >= 25
+        assert task.batch_count == 5
+
+        for key in test_cache_keys:
+            assert caches['default'].get(key) is None
+
+
+def test_unit_save_triggers_async_refresh(u1_s1, space_1, unit_gram):
+    with scopes_disabled():
+        initial_task_count = CacheRefreshTask.objects.filter(space=space_1).count()
+
+    url = reverse(DETAIL_URL, args=[unit_gram.id])
+    r = u1_s1.patch(url, {'name': 'gram_updated_v2'}, content_type='application/json')
+    assert r.status_code == 200
+
+    with scopes_disabled():
+        task = CacheRefreshTask.objects.filter(
+            space=space_1,
+            task_type=CacheRefreshType.UNIT_SAVE.value
+        ).order_by('-created_at').first()
+
+        assert task is not None
+        assert CacheRefreshTask.objects.filter(space=space_1).count() > initial_task_count
+
+        completed_task = wait_for_async_task(task.id, timeout=15)
+        assert completed_task is not None
+        assert completed_task.status == CacheRefreshStatus.COMPLETED.value

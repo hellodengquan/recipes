@@ -387,7 +387,7 @@ class MergeMixin(ViewSetMixin):
                     UnitConversion.objects.filter(food=source).delete()
 
                 if isinstance(source, Unit):
-                    source.merge_into(target)
+                    source.merge_into(target, created_by=self.request.user)
                     content = {'msg': _(f'{source.name} was merged successfully with {target.name}')}
                     return Response(content, status=status.HTTP_200_OK)
 

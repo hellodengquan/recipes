@@ -120,15 +120,25 @@ def update_food_inheritance(sender, instance=None, created=False, **kwargs):
 
 
 @receiver(post_save, sender=Unit)
+@skip_signal
 def clear_unit_cache(sender, instance=None, created=False, **kwargs):
     if instance:
-        CacheHelper(instance.space).clear_unit_related_caches()
+        from cookbook.helper.async_cache_refresher import AsyncCacheRefresher
+        AsyncCacheRefresher.submit_unit_save_refresh(
+            space=instance.space,
+            unit_id=instance.id,
+        )
 
 
 @receiver(post_delete, sender=Unit)
+@skip_signal
 def clear_unit_cache_on_delete(sender, instance=None, **kwargs):
     if instance:
-        CacheHelper(instance.space).clear_unit_related_caches()
+        from cookbook.helper.async_cache_refresher import AsyncCacheRefresher
+        AsyncCacheRefresher.submit_unit_delete_refresh(
+            space=instance.space,
+            unit_id=instance.id,
+        )
 
 
 @receiver(post_save, sender=PropertyType)
