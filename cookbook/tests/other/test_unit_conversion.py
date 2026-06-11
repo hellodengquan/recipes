@@ -367,3 +367,378 @@ def test_conversion_with_zero(space_1, space_2, u1_s1):
         conversions = uch.get_conversions(ingredient_food_1_gram)
 
         assert len(conversions) == 1 # conversion always includes the ingredient, if count is 1 no other conversion was found
+
+
+def test_base_unit_alias_chain_single_space(space_1, u1_s1):
+    """
+    Alias chain via custom UnitConversion: gram ↔ milligram ↔ microgram.
+    Tests BFS traversal of custom conversions forming an alias chain.
+    gram -> milligram (1g = 1000mg) and milligram -> microgram (1mg = 1000μg)
+    should yield gram -> microgram via multi-step.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_gram = Unit.objects.create(name='gram', base_unit='', space=space_1)
+        unit_mg = Unit.objects.create(name='milligram', base_unit='', space=space_1)
+        unit_microg = Unit.objects.create(name='microgram', base_unit='', space=space_1)
+
+        food = Food.objects.create(name='Alias Food', space=space_1)
+
+        UnitConversion.objects.create(
+            base_amount=1,
+            base_unit=unit_gram,
+            converted_amount=Decimal('1000'),
+            converted_unit=unit_mg,
+            space=space_1,
+            created_by=auth.get_user(u1_s1),
+        )
+        UnitConversion.objects.create(
+            base_amount=1,
+            base_unit=unit_mg,
+            converted_amount=Decimal('1000'),
+            converted_unit=unit_microg,
+            space=space_1,
+            created_by=auth.get_user(u1_s1),
+        )
+
+        ingredient = Ingredient.objects.create(
+            food=food,
+            unit=unit_gram,
+            amount=Decimal('1'),
+            space=space_1,
+        )
+
+        conversions = uch.get_conversions(ingredient)
+        unit_names = {c.unit.name for c in conversions}
+
+        assert 'gram' in unit_names
+        assert 'milligram' in unit_names
+        assert 'microgram' in unit_names, "microgram should be reachable via gram→mg→μg chain"
+
+        mg_conv = next(c for c in conversions if c.unit.name == 'milligram')
+        microg_conv = next(c for c in conversions if c.unit.name == 'microgram')
+        assert abs(mg_conv.amount - Decimal('1000')) < Decimal('0.001')
+        assert abs(microg_conv.amount - Decimal('1000000')) < Decimal('0.001')
+
+
+def test_base_unit_alias_chain_cross_system(space_1, u1_s1):
+    """
+    Alias chain across different unit systems (weight vs volume) should NOT
+    produce conversions between the systems.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_gram = Unit.objects.create(name='gram', base_unit='g', space=space_1)
+        unit_ml = Unit.objects.create(name='milliliter', base_unit='ml', space=space_1)
+        unit_l = Unit.objects.create(name='liter', base_unit='l', space=space_1)
+
+        food = Food.objects.create(name='Cross System Food', space=space_1)
+
+        ingredient = Ingredient.objects.create(
+            food=food,
+            unit=unit_gram,
+            amount=Decimal('100'),
+            space=space_1,
+        )
+
+        conversions = uch.get_conversions(ingredient)
+        unit_names = {c.unit.name for c in conversions}
+
+        assert 'gram' in unit_names
+        assert 'milliliter' not in unit_names
+        assert 'liter' not in unit_names
+
+
+def test_multi_space_alias_isolation(space_1, space_2, u1_s1, u1_s2):
+    """
+    Each space has its own unit alias chain. Units and conversions from
+    space_1 must NOT leak into space_2 and vice versa.
+    """
+    with scopes_disabled():
+        uch_s1 = UnitConversionHelper(space_1)
+        uch_s2 = UnitConversionHelper(space_2)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_gram_s1 = Unit.objects.create(name='gram', base_unit='g', space=space_1)
+        unit_kg_s1 = Unit.objects.create(name='kilogram', base_unit='kg', space=space_1)
+
+        unit_ounce_s2 = Unit.objects.create(name='ounce_custom', base_unit='ounce', space=space_2)
+        unit_pound_s2 = Unit.objects.create(name='pound_custom', base_unit='pound', space=space_2)
+
+        food_s1 = Food.objects.create(name='Food S1', space=space_1)
+        food_s2 = Food.objects.create(name='Food S2', space=space_2)
+
+        ing_s1 = Ingredient.objects.create(
+            food=food_s1,
+            unit=unit_gram_s1,
+            amount=Decimal('500'),
+            space=space_1,
+        )
+        ing_s2 = Ingredient.objects.create(
+            food=food_s2,
+            unit=unit_ounce_s2,
+            amount=Decimal('16'),
+            space=space_2,
+        )
+
+        conv_s1 = uch_s1.get_conversions(ing_s1)
+        conv_s2 = uch_s2.get_conversions(ing_s2)
+
+        names_s1 = {c.unit.name for c in conv_s1}
+        names_s2 = {c.unit.name for c in conv_s2}
+
+        assert 'kilogram' in names_s1
+        assert 'ounce_custom' not in names_s1
+        assert 'pound_custom' not in names_s1
+
+        assert 'pound_custom' in names_s2
+        assert 'gram' not in names_s2
+        assert 'kilogram' not in names_s2
+
+
+def test_multi_space_custom_conversion_isolation(space_1, space_2, u1_s1):
+    """
+    Custom UnitConversion created in space_1 must not be usable in space_2,
+    even if both spaces define units with the same name and base_unit.
+    """
+    with scopes_disabled():
+        uch_s1 = UnitConversionHelper(space_1)
+        uch_s2 = UnitConversionHelper(space_2)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_pcs_s1 = Unit.objects.create(name='pcs', base_unit='', space=space_1)
+        unit_gram_s1 = Unit.objects.create(name='gram', base_unit='g', space=space_1)
+
+        unit_pcs_s2 = Unit.objects.create(name='pcs', base_unit='', space=space_2)
+        unit_gram_s2 = Unit.objects.create(name='gram', base_unit='g', space=space_2)
+
+        food_s1 = Food.objects.create(name='Apple', space=space_1)
+        food_s2 = Food.objects.create(name='Apple', space=space_2)
+
+        UnitConversion.objects.create(
+            base_amount=1,
+            base_unit=unit_pcs_s1,
+            converted_amount=Decimal('150.5'),
+            converted_unit=unit_gram_s1,
+            food=food_s1,
+            space=space_1,
+            created_by=auth.get_user(u1_s1),
+        )
+
+        ing_s1 = Ingredient.objects.create(
+            food=food_s1, unit=unit_pcs_s1, amount=Decimal('3'), space=space_1,
+        )
+        ing_s2 = Ingredient.objects.create(
+            food=food_s2, unit=unit_pcs_s2, amount=Decimal('3'), space=space_2,
+        )
+
+        conv_s1 = uch_s1.get_conversions(ing_s1)
+        conv_s2 = uch_s2.get_conversions(ing_s2)
+
+        names_s1 = {c.unit.name for c in conv_s1}
+        names_s2 = {c.unit.name for c in conv_s2}
+
+        assert 'gram' in names_s1
+        gram_s1 = next(c for c in conv_s1 if c.unit.name == 'gram')
+        assert abs(gram_s1.amount - Decimal('451.5')) < Decimal('0.001')
+
+        assert 'gram' not in names_s2, "space_2 should not see space_1's custom conversion"
+
+
+def test_conversion_fractional_amounts(space_1, u1_s1):
+    """
+    Conversions should handle fractional amounts precisely.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_gram = Unit.objects.create(name='gram', base_unit='g', space=space_1)
+        unit_kg = Unit.objects.create(name='kg', base_unit='kg', space=space_1)
+
+        food = Food.objects.create(name='Fraction Food', space=space_1)
+
+        ing_half = Ingredient.objects.create(
+            food=food, unit=unit_gram, amount=Decimal('0.5'), space=space_1,
+        )
+        ing_third = Ingredient.objects.create(
+            food=food, unit=unit_gram, amount=Decimal('0.3333333333333333'), space=space_1,
+        )
+        ing_quarter = Ingredient.objects.create(
+            food=food, unit=unit_kg, amount=Decimal('0.25'), space=space_1,
+        )
+
+        conv_half = uch.get_conversions(ing_half)
+        conv_third = uch.get_conversions(ing_third)
+        conv_quarter = uch.get_conversions(ing_quarter)
+
+        kg_half = next(c for c in conv_half if c.unit.name == 'kg')
+        assert abs(kg_half.amount - Decimal('0.0005')) < Decimal('0.0000001')
+
+        kg_third = next(c for c in conv_third if c.unit.name == 'kg')
+        assert abs(kg_third.amount - Decimal('0.0003333333333333333')) < Decimal('0.000000000001')
+
+        gram_quarter = next(c for c in conv_quarter if c.unit.name == 'gram')
+        assert abs(gram_quarter.amount - Decimal('250')) < Decimal('0.0000001')
+
+
+def test_conversion_high_precision_decimal(space_1, u1_s1):
+    """
+    Conversions with high-precision decimal values (16 decimal places)
+    should not lose precision beyond acceptable tolerance.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_a = Unit.objects.create(name='unit_a', base_unit='', space=space_1)
+        unit_b = Unit.objects.create(name='unit_b', base_unit='', space=space_1)
+
+        food = Food.objects.create(name='Precision Food', space=space_1)
+
+        UnitConversion.objects.create(
+            base_amount=Decimal('1.0000000000000001'),
+            base_unit=unit_a,
+            converted_amount=Decimal('3.1415926535897932'),
+            converted_unit=unit_b,
+            space=space_1,
+            created_by=auth.get_user(u1_s1),
+        )
+
+        ingredient = Ingredient.objects.create(
+            food=food,
+            unit=unit_a,
+            amount=Decimal('2.7182818284590452'),
+            space=space_1,
+        )
+
+        conversions = uch.get_conversions(ingredient)
+        unit_b_conv = next(c for c in conversions if c.unit.name == 'unit_b')
+
+        expected = Decimal('2.7182818284590452') * Decimal('3.1415926535897932') / Decimal('1.0000000000000001')
+        tolerance = Decimal('0.000000000001')
+        assert abs(unit_b_conv.amount - expected) < tolerance
+
+
+def test_conversion_extreme_large_amounts(space_1, u1_s1):
+    """
+    Conversions should handle extremely large amounts without overflow
+    or precision collapse (max_digits=32 per model).
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+
+        result = uch.convert_from_to('g', 'kg', Decimal('99999999999999.99999999999999'))
+        expected = Decimal('99999999999.9999999999999999')
+        assert abs(result - expected) < Decimal('0.0000000001')
+
+
+def test_conversion_extreme_small_amounts(space_1, u1_s1):
+    """
+    Conversions should handle extremely small amounts (close to zero)
+    without underflowing to zero.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+
+        tiny = Decimal('0.0000000000000001')
+        result = uch.convert_from_to('g', 'kg', tiny)
+        expected = Decimal('0.0000000000000000001')
+        assert abs(result - expected) < Decimal('0.000000000000000000001')
+        assert result > 0
+
+
+def test_conversion_negative_amounts(space_1, u1_s1):
+    """
+    Negative amounts (e.g. for inventory adjustments) should convert correctly.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_gram = Unit.objects.create(name='gram', base_unit='g', space=space_1)
+        unit_kg = Unit.objects.create(name='kg', base_unit='kg', space=space_1)
+        food = Food.objects.create(name='Neg Food', space=space_1)
+
+        ingredient = Ingredient.objects.create(
+            food=food, unit=unit_gram, amount=Decimal('-500'), space=space_1,
+        )
+
+        conversions = uch.get_conversions(ingredient)
+        kg_conv = next(c for c in conversions if c.unit.name == 'kg')
+        assert abs(kg_conv.amount - Decimal('-0.5')) < Decimal('0.0000001')
+
+
+def test_base_conversion_ignores_duplicate_aliases(space_1, u1_s1):
+    """
+    When multiple units share the same base_unit AND the same display name,
+    the conversion helper should deduplicate and not produce duplicate entries.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_g1 = Unit.objects.create(name='gram', base_unit='g', space=space_1)
+        unit_kg = Unit.objects.create(name='kg', base_unit='kg', space=space_1)
+
+        food = Food.objects.create(name='Dedup Food', space=space_1)
+
+        ingredient = Ingredient.objects.create(
+            food=food, unit=unit_g1, amount=Decimal('1000'), space=space_1,
+        )
+
+        conversions = uch.get_conversions(ingredient)
+        gram_entries = [c for c in conversions if c.unit.name == 'gram']
+        assert len(gram_entries) == 1, f"Expected 1 'gram' entry, got {len(gram_entries)}"
+
+
+def test_alias_chain_with_custom_conversion(space_1, u1_s1):
+    """
+    Base unit alias chain combined with custom conversion:
+    pinch -> tsp (custom) + tsp -> ml (base) + tsp -> liter (base alias)
+    should yield pinch -> ml and pinch -> liter via multi-step BFS.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        UnitConversionHelper._base_units_cache.clear()
+
+        unit_pinch = Unit.objects.create(name='pinch', base_unit='', space=space_1)
+        unit_tsp = Unit.objects.create(name='tsp', base_unit='tsp', space=space_1)
+        unit_ml = Unit.objects.create(name='ml', base_unit='ml', space=space_1)
+        unit_l = Unit.objects.create(name='liter', base_unit='l', space=space_1)
+
+        food = Food.objects.create(name='Salt', space=space_1)
+
+        UnitConversion.objects.create(
+            base_amount=8,
+            base_unit=unit_pinch,
+            converted_amount=1,
+            converted_unit=unit_tsp,
+            food=food,
+            space=space_1,
+            created_by=auth.get_user(u1_s1),
+        )
+
+        ingredient = Ingredient.objects.create(
+            food=food, unit=unit_pinch, amount=Decimal('16'), space=space_1,
+        )
+
+        conversions = uch.get_conversions(ingredient)
+        unit_names = {c.unit.name for c in conversions}
+
+        assert 'pinch' in unit_names
+        assert 'tsp' in unit_names
+        assert 'ml' in unit_names, "pinch -> tsp -> ml via alias chain"
+        assert 'liter' in unit_names, "pinch -> tsp -> liter via alias chain"
+
+        tsp_conv = next(c for c in conversions if c.unit.name == 'tsp')
+        ml_conv = next(c for c in conversions if c.unit.name == 'ml')
+        l_conv = next(c for c in conversions if c.unit.name == 'liter')
+
+        assert abs(tsp_conv.amount - Decimal('2')) < Decimal('0.001')
+        assert abs(ml_conv.amount - Decimal('9.8578')) < Decimal('0.01')
+        assert abs(l_conv.amount - Decimal('0.0098578')) < Decimal('0.0001')
