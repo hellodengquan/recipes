@@ -72,6 +72,16 @@
                             :placeholder="$t('RequestNotePlaceholder')"
                             class="mt-2"
                         ></v-text-field>
+                        <div v-if="hasAddDraft" class="d-flex align-center mt-2">
+                            <v-icon icon="$save" size="small" color="info" class="me-2"></v-icon>
+                            <span class="text-caption text-grey">
+                                {{ $t('DraftSavedAt', { time: formatDraftTime(addDraftSavedAt) }) }}
+                            </span>
+                            <v-spacer></v-spacer>
+                            <v-btn size="x-small" variant="text" color="grey" @click="clearAddDraftLocal">
+                                {{ $t('ClearDraft') }}
+                            </v-btn>
+                        </div>
                     </template>
 
                     <v-data-table-server
@@ -209,6 +219,12 @@
                             rows="4"
                         ></v-textarea>
                     </v-col>
+                    <v-col cols="12" v-if="hasResubmitDraft">
+                        <v-alert type="info" variant="tonal" density="compact">
+                            <v-icon start icon="$save"></v-icon>
+                            {{ $t('RestoredFromDraft') }}
+                        </v-alert>
+                    </v-col>
                 </v-row>
             </v-card-text>
             <v-card-actions>
@@ -235,6 +251,99 @@ import ModelSelect from "@/components/inputs/ModelSelect.vue";
 import {ErrorMessageType, MessageType, PreparedMessage, useMessageStore} from "@/stores/MessageStore";
 import {useUserPreferenceStore} from "@/stores/UserPreferenceStore";
 import {useI18n} from "vue-i18n";
+
+const DRAFT_EXPIRE_DAYS = 7
+const DRAFT_KEY_PREFIX = 'tandoor:cr_draft'
+
+interface AddRequestDraft {
+    recipeId: number | null
+    recipeName: string
+    note: string
+    savedAt: string
+}
+
+interface ResubmitDraft {
+    note: string
+    savedAt: string
+}
+
+function getAddDraftKey(bookId: number | undefined): string {
+    return `${DRAFT_KEY_PREFIX}:add:${bookId}`
+}
+
+function getResubmitDraftKey(requestId: number): string {
+    return `${DRAFT_KEY_PREFIX}:resubmit:${requestId}`
+}
+
+function isDraftExpired(savedAt: string): boolean {
+    const saved = new Date(savedAt).getTime()
+    const now = Date.now()
+    const expireMs = DRAFT_EXPIRE_DAYS * 24 * 60 * 60 * 1000
+    return now - saved > expireMs
+}
+
+function loadAddDraft(bookId: number | undefined): AddRequestDraft | null {
+    if (!bookId) return null
+    try {
+        const raw = localStorage.getItem(getAddDraftKey(bookId))
+        if (!raw) return null
+        const draft = JSON.parse(raw) as AddRequestDraft
+        if (isDraftExpired(draft.savedAt)) {
+            localStorage.removeItem(getAddDraftKey(bookId))
+            return null
+        }
+        return draft
+    } catch {
+        return null
+    }
+}
+
+function saveAddDraft(bookId: number | undefined, draft: Omit<AddRequestDraft, 'savedAt'>) {
+    if (!bookId) return
+    try {
+        const full: AddRequestDraft = {...draft, savedAt: new Date().toISOString()}
+        localStorage.setItem(getAddDraftKey(bookId), JSON.stringify(full))
+    } catch {
+    }
+}
+
+function clearAddDraft(bookId: number | undefined) {
+    if (!bookId) return
+    try {
+        localStorage.removeItem(getAddDraftKey(bookId))
+    } catch {
+    }
+}
+
+function loadResubmitDraft(requestId: number): ResubmitDraft | null {
+    try {
+        const raw = localStorage.getItem(getResubmitDraftKey(requestId))
+        if (!raw) return null
+        const draft = JSON.parse(raw) as ResubmitDraft
+        if (isDraftExpired(draft.savedAt)) {
+            localStorage.removeItem(getResubmitDraftKey(requestId))
+            return null
+        }
+        return draft
+    } catch {
+        return null
+    }
+}
+
+function saveResubmitDraft(requestId: number, draft: Omit<ResubmitDraft, 'savedAt'>) {
+    try {
+        const full: ResubmitDraft = {...draft, savedAt: new Date().toISOString()}
+        localStorage.setItem(getResubmitDraftKey(requestId), JSON.stringify(full))
+    } catch {
+    }
+}
+
+function clearResubmitDraft(requestId: number) {
+    try {
+        localStorage.removeItem(getResubmitDraftKey(requestId))
+    } catch {
+    }
+}
 
 interface ChangeRequestItem {
     id: number
@@ -280,6 +389,7 @@ const resubmitDialogVisible = ref(false)
 const resubmittingItem = ref<ChangeRequestItem | null>(null)
 const resubmitNote = ref('')
 const resubmitLoading = ref(false)
+const hasResubmitDraft = ref(false)
 
 const tablePage = ref(1)
 const itemCount = ref(0)
@@ -291,6 +401,16 @@ const isOwner = computed(() => {
     return editingObj.value.createdBy.id === currentUserId.value
 })
 const pendingChangeRequestsCount = computed(() => editingObj.value?.pendingChangeRequestsCount || 0)
+
+const hasAddDraft = computed(() => {
+    if (!editingObj.value?.id) return false
+    return loadAddDraft(editingObj.value.id) !== null
+})
+const addDraftSavedAt = computed(() => {
+    if (!editingObj.value?.id) return ''
+    const draft = loadAddDraft(editingObj.value.id)
+    return draft ? draft.savedAt : ''
+})
 
 function getStatusColor(status: string): string {
     switch (status) {
@@ -319,6 +439,78 @@ const changeRequestHeaders = [
 onMounted(() => {
     initializeEditor()
 })
+
+let draftSaveTimer: number | null = null
+
+watch([selectedRecipe, addRequestNote], () => {
+    if (!editingObj.value?.id) return
+    if (draftSaveTimer) clearTimeout(draftSaveTimer)
+    draftSaveTimer = window.setTimeout(() => {
+        saveAddDraft(editingObj.value!.id, {
+            recipeId: selectedRecipe.value.id || null,
+            recipeName: selectedRecipe.value.name || '',
+            note: addRequestNote.value,
+        })
+    }, 500)
+}, { deep: true })
+
+watch(resubmitNote, () => {
+    if (!resubmittingItem.value) return
+    saveResubmitDraft(resubmittingItem.value.id, {
+        note: resubmitNote.value,
+    })
+    hasResubmitDraft.value = true
+})
+
+watch(() => editingObj.value?.id, (newId) => {
+    if (newId && isUpdate()) {
+        restoreAddDraft()
+    }
+})
+
+function restoreAddDraft() {
+    if (!editingObj.value?.id) return
+    const draft = loadAddDraft(editingObj.value.id)
+    if (!draft) return
+    if (draft.recipeId) {
+        let api = new ApiApi()
+        api.apiRecipeRead({ id: draft.recipeId }).then(r => {
+            if (r.id) {
+                selectedRecipe.value = r
+            }
+        }).catch(() => {
+            if (draft.recipeName) {
+                selectedRecipe.value = { id: draft.recipeId, name: draft.recipeName } as Recipe
+            }
+        })
+    }
+    if (draft.note) {
+        addRequestNote.value = draft.note
+    }
+}
+
+function clearAddDraftLocal() {
+    clearAddDraft(editingObj.value?.id)
+    if (draftSaveTimer) {
+        clearTimeout(draftSaveTimer)
+        draftSaveTimer = null
+    }
+    selectedRecipe.value = {} as Recipe
+    addRequestNote.value = ''
+}
+
+function formatDraftTime(isoString: string): string {
+    if (!isoString) return ''
+    const d = new Date(isoString)
+    const now = new Date()
+    const diffMs = now.getTime() - d.getTime()
+    const diffMins = Math.floor(diffMs / 60000)
+    const diffHours = Math.floor(diffMs / 3600000)
+    if (diffMins < 1) return t('JustNow')
+    if (diffMins < 60) return t('MinutesAgo', { count: diffMins })
+    if (diffHours < 24) return t('HoursAgo', { count: diffHours })
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
 
 function initializeEditor() {
     setupState(props.item, props.itemId, {
@@ -409,6 +601,7 @@ function submitAddRequest() {
     }).then(() => {
         selectedRecipe.value = {} as Recipe
         addRequestNote.value = ''
+        clearAddDraftLocal()
         useMessageStore().addPreparedMessage(PreparedMessage.CREATE_SUCCESS)
         loadChangeRequests({page: 1, itemsPerPage: 10, sortBy: [], groupBy: [], search: ''})
     }).catch(err => {
@@ -531,6 +724,13 @@ function refreshEditingObj() {
 function openResubmitDialog(item: ChangeRequestItem) {
     resubmittingItem.value = item
     resubmitNote.value = item.note || ''
+    const draft = loadResubmitDraft(item.id)
+    if (draft && draft.note !== item.note) {
+        resubmitNote.value = draft.note
+        hasResubmitDraft.value = true
+    } else {
+        hasResubmitDraft.value = false
+    }
     resubmitDialogVisible.value = true
 }
 
@@ -555,8 +755,12 @@ function confirmResubmit() {
     }).then(() => {
         useMessageStore().addPreparedMessage(PreparedMessage.CREATE_SUCCESS)
         resubmitDialogVisible.value = false
+        if (resubmittingItem.value) {
+            clearResubmitDraft(resubmittingItem.value.id)
+        }
         resubmittingItem.value = null
         resubmitNote.value = ''
+        hasResubmitDraft.value = false
         loadRecipeBookEntries({page: tablePage.value, itemsPerPage: 10, sortBy: [], groupBy: [], search: ''})
         loadChangeRequests({page: 1, itemsPerPage: 10, sortBy: [], groupBy: [], search: ''})
         refreshEditingObj()

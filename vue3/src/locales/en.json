@@ -1012,5 +1012,11 @@
   "ChangeRequestWithdrawn": "Change request withdrawn.",
   "Resubmit": "Resubmit",
   "ResubmitChangeRequest": "Resubmit Change Request",
-  "Cancel": "Cancel"
+  "Cancel": "Cancel",
+  "DraftSavedAt": "Draft saved {time}",
+  "ClearDraft": "Clear draft",
+  "RestoredFromDraft": "Restored from local draft",
+  "JustNow": "just now",
+  "MinutesAgo": "{count} min ago",
+  "HoursAgo": "{count} hours ago"
 }
