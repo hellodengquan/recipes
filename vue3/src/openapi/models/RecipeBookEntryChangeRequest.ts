@@ -122,6 +122,8 @@ export interface RecipeBookEntryChangeRequest {
      * @memberof RecipeBookEntryChangeRequest
      */
     readonly reviewedAt?: Date | null;
+    readonly isCreator?: boolean;
+    readonly isBookOwner?: boolean;
 }
 
 /**
@@ -178,6 +180,8 @@ export function RecipeBookEntryChangeRequestFromJSONTyped(json: any, ignoreDiscr
         'createdAt': json['created_at'] == null ? undefined : (new Date(json['created_at'])),
         'updatedAt': json['updated_at'] == null ? undefined : (new Date(json['updated_at'])),
         'reviewedAt': json['reviewed_at'] == null ? undefined : (json['reviewed_at'] == null ? null : new Date(json['reviewed_at'])),
+        'isCreator': json['is_creator'] == null ? undefined : json['is_creator'],
+        'isBookOwner': json['is_book_owner'] == null ? undefined : json['is_book_owner'],
     };
 }
 

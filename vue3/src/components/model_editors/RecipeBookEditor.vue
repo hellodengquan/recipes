@@ -18,7 +18,7 @@
                 <v-tab value="change-requests" :disabled="!isUpdate()">
                     {{ $t('ChangeRequests') }}
                     <v-badge
-                        v-if="isOwner && pendingChangeRequestsCount > 0"
+                        v-if="pendingChangeRequestsCount > 0"
                         :content="pendingChangeRequestsCount"
                         color="warning"
                         class="ms-2"
@@ -129,25 +129,14 @@
                         :headers="changeRequestHeaders"
                         :items-length="changeRequestCount"
                     >
-                        <template #item.action="{item}">
-                            <template v-if="item.status === 'PENDING'">
-                                <template v-if="isOwner">
-                                    <v-btn size="small" color="success" variant="flat" class="me-1" @click="approveRequest(item)">
-                                        <v-icon start icon="$check"></v-icon>
-                                        {{ $t('Approve') }}
-                                    </v-btn>
-                                    <v-btn size="small" color="error" variant="flat" @click="rejectRequest(item)">
-                                        <v-icon start icon="$close"></v-icon>
-                                        {{ $t('Reject') }}
-                                    </v-btn>
-                                </template>
-                                <template v-else-if="isRequestCreator(item)">
-                                    <v-btn size="small" color="warning" variant="flat" @click="withdrawRequest(item)">
-                                        <v-icon start icon="$undo"></v-icon>
-                                        {{ $t('Withdraw') }}
-                                    </v-btn>
-                                </template>
-                            </template>
+                        <template #item.action_type="{item}">
+                            <v-chip
+                                :color="item.action === 'ADD' ? 'success' : 'warning'"
+                                size="small"
+                                variant="outlined"
+                            >
+                                {{ item.action === 'ADD' ? $t('AddRecipe') : $t('RemoveRecipe') }}
+                            </v-chip>
                         </template>
 
                         <template #item.status="{item}">
@@ -160,15 +149,30 @@
                             </v-chip>
                         </template>
 
-                        <template #item.action_type="{item}">
-                            <v-chip
-                                :color="item.action === 'ADD' ? 'success' : 'warning'"
-                                size="small"
-                                variant="outlined"
-                            >
-                                {{ item.action === 'ADD' ? $t('AddRecipe') : $t('RemoveRecipe') }}
-                            </v-chip>
+                        <template #item.operations="{item}">
+                            <template v-if="item.status === 'PENDING'">
+                                <template v-if="item.isBookOwner">
+                                    <v-btn size="small" color="success" variant="flat" class="me-1" @click="approveRequest(item)">
+                                        <v-icon start icon="$check"></v-icon>
+                                        {{ $t('Approve') }}
+                                    </v-btn>
+                                    <v-btn size="small" color="error" variant="flat" @click="rejectRequest(item)">
+                                        <v-icon start icon="$close"></v-icon>
+                                        {{ $t('Reject') }}
+                                    </v-btn>
+                                </template>
+                                <template v-else-if="item.isCreator">
+                                    <v-btn size="small" color="warning" variant="flat" @click="withdrawRequest(item)">
+                                        <v-icon start icon="$undo"></v-icon>
+                                        {{ $t('Withdraw') }}
+                                    </v-btn>
+                                </template>
+                            </template>
+                            <template v-else>
+                                <span class="text-grey text-caption">{{ $t('Status' + item.status) }}</span>
+                            </template>
                         </template>
+
                     </v-data-table-server>
                 </v-tabs-window-item>
 
@@ -180,7 +184,7 @@
 <script setup lang="ts">
 
 import {computed, onMounted, PropType, ref, watch} from "vue";
-import {ApiApi, Recipe, RecipeBook, RecipeBookEntry, RecipeBookEntryChangeRequest, User} from "@/openapi";
+import {ApiApi, Recipe, RecipeBook, RecipeBookEntry, User} from "@/openapi";
 import {VDataTableUpdateOptions} from "@/vuetify";
 
 import {useModelEditorFunctions} from "@/composables/useModelEditorFunctions";
@@ -189,6 +193,23 @@ import ModelSelect from "@/components/inputs/ModelSelect.vue";
 import {ErrorMessageType, MessageType, PreparedMessage, useMessageStore} from "@/stores/MessageStore";
 import {useUserPreferenceStore} from "@/stores/UserPreferenceStore";
 import {useI18n} from "vue-i18n";
+
+interface ChangeRequestItem {
+    id: number
+    book: number
+    recipe: number
+    action: string
+    status: string
+    note: string
+    isCreator: boolean
+    isBookOwner: boolean
+    recipeContent: { name: string; id: number }
+    createdBy: { id: number; displayName: string } | null
+    reviewedBy: { id: number; displayName: string } | null
+    reviewNote: string
+    createdAt: string
+    reviewedAt: string | null
+}
 
 const props = defineProps({
     item: {type: {} as PropType<RecipeBook>, required: false, default: null},
@@ -207,7 +228,7 @@ watch([() => props.item, () => props.itemId], () => {
 const {t} = useI18n()
 const tab = ref("book")
 const recipeBookEntries = ref([] as RecipeBookEntry[])
-const changeRequests = ref([] as RecipeBookEntryChangeRequest[])
+const changeRequests = ref([] as ChangeRequestItem[])
 
 const selectedRecipe = ref({} as Recipe)
 const addRequestNote = ref('')
@@ -222,11 +243,6 @@ const isOwner = computed(() => {
     return editingObj.value.createdBy.id === currentUserId.value
 })
 const pendingChangeRequestsCount = computed(() => editingObj.value?.pendingChangeRequestsCount || 0)
-
-function isRequestCreator(item: RecipeBookEntryChangeRequest): boolean {
-    if (!item.createdBy || !currentUserId.value) return false
-    return item.createdBy.id === currentUserId.value
-}
 
 function getStatusColor(status: string): string {
     switch (status) {
@@ -249,7 +265,7 @@ const changeRequestHeaders = [
     {title: t('Status'), key: 'status'},
     {title: t('RequestedBy'), key: 'createdBy.displayName'},
     {title: t('CreatedAt'), key: 'createdAt'},
-    {key: 'action', width: '1%', noBreak: true, align: 'end'},
+    {key: 'operations', width: '1%', noBreak: true, align: 'end'},
 ]
 
 onMounted(() => {
@@ -269,6 +285,31 @@ function initializeEditor() {
         },
         itemDefaults: props.itemDefaults
     })
+}
+
+function mapChangeRequest(raw: any): ChangeRequestItem {
+    return {
+        id: raw.id,
+        book: raw.book,
+        recipe: raw.recipe,
+        action: raw.action,
+        status: raw.status,
+        note: raw.note || '',
+        isCreator: raw.is_creator === true,
+        isBookOwner: raw.is_book_owner === true,
+        recipeContent: raw.recipe_content
+            ? {name: raw.recipe_content.name || '', id: raw.recipe_content.id}
+            : {name: '', id: 0},
+        createdBy: raw.created_by
+            ? {id: raw.created_by.id, displayName: raw.created_by.display_name || ''}
+            : null,
+        reviewedBy: raw.reviewed_by
+            ? {id: raw.reviewed_by.id, displayName: raw.reviewed_by.display_name || ''}
+            : null,
+        reviewNote: raw.review_note || '',
+        createdAt: raw.created_at || '',
+        reviewedAt: raw.reviewed_at || null,
+    }
 }
 
 function addRecipeToBook() {
@@ -299,14 +340,6 @@ function addRecipeToBook() {
 
 function submitAddRequest() {
     if (!selectedRecipe.value || !selectedRecipe.value.id || !editingObj.value.id) return
-
-    let api = new ApiApi()
-
-    const params = new URLSearchParams()
-    params.set('book', String(editingObj.value.id!))
-    params.set('recipe', String(selectedRecipe.value.id!))
-    params.set('action', 'ADD')
-    params.set('status', 'PENDING')
 
     fetch(`/api/recipe-book-entry-change-request/`, {
         method: 'POST',
@@ -373,7 +406,7 @@ function removeRecipeFromBook(recipeBookEntry: RecipeBookEntry) {
     })
 }
 
-function approveRequest(item: RecipeBookEntryChangeRequest) {
+function approveRequest(item: ChangeRequestItem) {
     fetch(`/api/recipe-book-entry-change-request/${item.id}/approve/`, {
         method: 'POST',
         headers: {
@@ -389,12 +422,13 @@ function approveRequest(item: RecipeBookEntryChangeRequest) {
         useMessageStore().addMessage(MessageType.SUCCESS, t('ChangeRequestApproved'), 3000)
         loadRecipeBookEntries({page: tablePage.value, itemsPerPage: 10, sortBy: [], groupBy: [], search: ''})
         loadChangeRequests({page: 1, itemsPerPage: 10, sortBy: [], groupBy: [], search: ''})
+        refreshEditingObj()
     }).catch(err => {
         useMessageStore().addError(ErrorMessageType.UPDATE_ERROR, err)
     })
 }
 
-function rejectRequest(item: RecipeBookEntryChangeRequest) {
+function rejectRequest(item: ChangeRequestItem) {
     fetch(`/api/recipe-book-entry-change-request/${item.id}/reject/`, {
         method: 'POST',
         headers: {
@@ -409,12 +443,13 @@ function rejectRequest(item: RecipeBookEntryChangeRequest) {
     }).then(() => {
         useMessageStore().addMessage(MessageType.INFO, t('ChangeRequestRejected'), 3000)
         loadChangeRequests({page: 1, itemsPerPage: 10, sortBy: [], groupBy: [], search: ''})
+        refreshEditingObj()
     }).catch(err => {
         useMessageStore().addError(ErrorMessageType.UPDATE_ERROR, err)
     })
 }
 
-function withdrawRequest(item: RecipeBookEntryChangeRequest) {
+function withdrawRequest(item: ChangeRequestItem) {
     fetch(`/api/recipe-book-entry-change-request/${item.id}/withdraw/`, {
         method: 'POST',
         headers: {
@@ -430,8 +465,17 @@ function withdrawRequest(item: RecipeBookEntryChangeRequest) {
         useMessageStore().addMessage(MessageType.INFO, t('ChangeRequestWithdrawn'), 3000)
         loadRecipeBookEntries({page: tablePage.value, itemsPerPage: 10, sortBy: [], groupBy: [], search: ''})
         loadChangeRequests({page: 1, itemsPerPage: 10, sortBy: [], groupBy: [], search: ''})
+        refreshEditingObj()
     }).catch(err => {
         useMessageStore().addError(ErrorMessageType.UPDATE_ERROR, err)
+    })
+}
+
+function refreshEditingObj() {
+    if (!editingObj.value.id) return
+    let api = new ApiApi()
+    api.apiRecipeBookRead({id: editingObj.value.id}).then(r => {
+        editingObj.value = r
     })
 }
 
@@ -483,7 +527,7 @@ function loadChangeRequests(options: VDataTableUpdateOptions) {
         if (!response.ok) throw response
         return response.json()
     }).then(r => {
-        changeRequests.value = r.results
+        changeRequests.value = (r.results || []).map(mapChangeRequest)
         changeRequestCount.value = r.count
     }).catch((err: any) => {
         useMessageStore().addError(ErrorMessageType.FETCH_ERROR, err)

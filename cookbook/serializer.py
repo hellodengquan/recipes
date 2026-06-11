@@ -1397,6 +1397,8 @@ class RecipeBookEntryChangeRequestSerializer(serializers.ModelSerializer):
     reviewed_by = UserSerializer(read_only=True)
     book_content = serializers.SerializerMethodField(method_name='get_book_content', read_only=True)
     recipe_content = serializers.SerializerMethodField(method_name='get_recipe_content', read_only=True)
+    is_creator = serializers.SerializerMethodField()
+    is_book_owner = serializers.SerializerMethodField()
 
     @extend_schema_field(RecipeBookSerializer)
     def get_book_content(self, obj):
@@ -1405,6 +1407,20 @@ class RecipeBookEntryChangeRequestSerializer(serializers.ModelSerializer):
     @extend_schema_field(RecipeOverviewSerializer)
     def get_recipe_content(self, obj):
         return RecipeOverviewSerializer(context={'request': self.context['request']}).to_representation(obj.recipe)
+
+    @extend_schema_field(bool)
+    def get_is_creator(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        return obj.created_by == request.user
+
+    @extend_schema_field(bool)
+    def get_is_book_owner(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        return obj.book.get_owner() == request.user
 
     def validate(self, attrs):
         user = self.context['request'].user
@@ -1442,8 +1458,8 @@ class RecipeBookEntryChangeRequestSerializer(serializers.ModelSerializer):
         model = RecipeBookEntryChangeRequest
         fields = ('id', 'book', 'book_content', 'recipe', 'recipe_content', 'action',
                   'status', 'note', 'created_by', 'reviewed_by', 'review_note',
-                  'created_at', 'updated_at', 'reviewed_at',)
-        read_only_fields = ('created_by', 'reviewed_by', 'status', 'created_at', 'updated_at', 'reviewed_at',)
+                  'created_at', 'updated_at', 'reviewed_at', 'is_creator', 'is_book_owner')
+        read_only_fields = ('created_by', 'reviewed_by', 'status', 'created_at', 'updated_at', 'reviewed_at', 'is_creator', 'is_book_owner')
 
 
 class RecipeBookChangeRequestReviewSerializer(serializers.Serializer):

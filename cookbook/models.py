@@ -1289,6 +1289,12 @@ class RecipeBookEntryChangeRequest(ExportModelOperationsMixin('book_entry_change
         except AttributeError:
             return None
 
+    def get_shared(self):
+        try:
+            return self.book.get_shared()
+        except AttributeError:
+            return []
+
     def __str__(self):
         return f'{self.get_action_display()} - {self.recipe.name} - {self.get_status_display()}'
 
