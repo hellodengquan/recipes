@@ -72,6 +72,7 @@ router.register(r'ai-log', api.AiLogViewSet)
 router.register(r'localization', api.LocalizationViewSet, basename='localization')
 router.register(r'server-settings', api.ServerSettingsViewSet, basename='server-settings')
 router.register(r'ingredient-parser', api.IngredientParserView, basename='ingredient-parser')
+router.register(r'ingredient-alias', api.IngredientAliasViewSet, basename='ingredient-alias')
 
 for p in PLUGINS:
     if c := locate(f'{p["module"]}.urls.{p["api_router_name"]}'):

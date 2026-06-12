@@ -2142,6 +2142,30 @@ class SourceImportRecipeSerializer(serializers.Serializer):
     properties = serializers.ListField(child=SourceImportPropertySerializer(), default=[])
 
 
+class IngredientAliasLanguageSerializer(serializers.Serializer):
+    en = serializers.CharField(required=True)
+    zh = serializers.CharField(required=True)
+    fr = serializers.CharField(required=True)
+
+
+class IngredientAliasEntrySerializer(serializers.Serializer):
+    canonical_key = serializers.CharField(required=True)
+    languages = IngredientAliasLanguageSerializer(required=True)
+    aliases = serializers.ListField(child=serializers.CharField(), required=True)
+    alias_count = serializers.IntegerField(required=False, read_only=True)
+
+
+class IngredientAliasCreateSerializer(serializers.Serializer):
+    canonical_key = serializers.CharField(required=True)
+    languages = IngredientAliasLanguageSerializer(required=True)
+    aliases = serializers.ListField(child=serializers.CharField(), required=True)
+
+
+class IngredientAliasUpdateSerializer(serializers.Serializer):
+    languages = serializers.DictField(child=serializers.CharField(), required=False)
+    aliases = serializers.ListField(child=serializers.CharField(), required=False)
+
+
 class SourceImportDuplicateNameMatchSerializer(serializers.Serializer):
     matched = serializers.BooleanField(default=False)
     similarity = serializers.FloatField(default=0.0)

@@ -122,7 +122,8 @@ from cookbook.serializer import (AccessTokenSerializer, AutomationSerializer, Au
                                  AiImportSerializer, ImportOpenDataSerializer, ImportOpenDataMetaDataSerializer, ImportOpenDataResponseSerializer, ExportRequestSerializer,
                                  RecipeImportSerializer, ConnectorConfigSerializer, SearchPreferenceSerializer, SearchFieldsSerializer, RecipeBatchUpdateSerializer,
                                  AiProviderSerializer, AiLogSerializer, FoodBatchUpdateSerializer, GenericModelReferenceSerializer, ShoppingListSerializer,
-                                 IngredientParserRequestSerializer, IngredientParserResponseSerializer, HouseholdSerializer, UserSpaceBatchUpdateSerializer
+                                 IngredientParserRequestSerializer, IngredientParserResponseSerializer, HouseholdSerializer, UserSpaceBatchUpdateSerializer,
+                                 IngredientAliasEntrySerializer, IngredientAliasCreateSerializer, IngredientAliasUpdateSerializer
                                  )
 from cookbook.version_info import TANDOOR_VERSION
 from cookbook.views.import_export import get_integration
@@ -3289,6 +3290,81 @@ class IngredientParserView(viewsets.GenericViewSet):
             return Response(IngredientParserResponseSerializer(context={'request': request}).to_representation(response_obj))
 
         return Response({'error': True, 'msg': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class IngredientAliasViewSet(viewsets.GenericViewSet):
+    permission_classes = [CustomIsAdmin & CustomTokenHasReadWriteScope]
+    serializer_class = IngredientAliasEntrySerializer
+
+    def list(self, request, *args, **kwargs):
+        from cookbook.helper.ingredient_normalizer import get_all_supported_ingredients
+        ingredients = get_all_supported_ingredients()
+        return Response(IngredientAliasEntrySerializer(ingredients, many=True).data)
+
+    def retrieve(self, request, pk=None, *args, **kwargs):
+        from cookbook.helper.ingredient_normalizer import get_canonical_names
+        data = get_canonical_names()
+        if pk not in data:
+            return Response({'error': True, 'msg': f'Canonical key "{pk}" not found'}, status=status.HTTP_404_NOT_FOUND)
+        entry = data[pk]
+        result = {
+            'canonical_key': pk,
+            'languages': entry.get('languages', {}),
+            'aliases': entry.get('aliases', []),
+            'alias_count': len(entry.get('aliases', [])),
+        }
+        return Response(IngredientAliasEntrySerializer(result).data)
+
+    def create(self, request, *args, **kwargs):
+        from cookbook.helper.ingredient_normalizer import add_alias_entry
+        serializer = IngredientAliasCreateSerializer(data=request.data)
+        if serializer.is_valid():
+            try:
+                success = add_alias_entry(
+                    canonical_key=serializer.validated_data['canonical_key'],
+                    languages=serializer.validated_data['languages'],
+                    aliases=serializer.validated_data['aliases'],
+                )
+                if success:
+                    return Response({'success': True}, status=status.HTTP_201_CREATED)
+                return Response({'error': True, 'msg': 'Failed to save'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception as e:
+                return Response({'error': True, 'msg': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({'error': True, 'msg': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+    def update(self, request, pk=None, *args, **kwargs):
+        from cookbook.helper.ingredient_normalizer import update_alias_entry
+        serializer = IngredientAliasUpdateSerializer(data=request.data)
+        if serializer.is_valid():
+            try:
+                success = update_alias_entry(
+                    canonical_key=pk,
+                    languages=serializer.validated_data.get('languages'),
+                    aliases=serializer.validated_data.get('aliases'),
+                )
+                if success:
+                    return Response({'success': True})
+                return Response({'error': True, 'msg': 'Failed to save'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except ValueError as e:
+                return Response({'error': True, 'msg': str(e)}, status=status.HTTP_404_NOT_FOUND)
+            except Exception as e:
+                return Response({'error': True, 'msg': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({'error': True, 'msg': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+    def partial_update(self, request, pk=None, *args, **kwargs):
+        return self.update(request, pk, *args, **kwargs)
+
+    def destroy(self, request, pk=None, *args, **kwargs):
+        from cookbook.helper.ingredient_normalizer import delete_alias_entry
+        try:
+            success = delete_alias_entry(canonical_key=pk)
+            if success:
+                return Response({'success': True}, status=status.HTTP_204_NO_CONTENT)
+            return Response({'error': True, 'msg': 'Failed to delete'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except ValueError as e:
+            return Response({'error': True, 'msg': str(e)}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({'error': True, 'msg': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @extend_schema(
