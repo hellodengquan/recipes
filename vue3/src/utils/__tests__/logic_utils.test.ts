@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { aggregateShoppingEntriesByUnit } from '../logic_utils'
+import { aggregateShoppingEntriesByUnit, aggregateShoppingEntriesByUnitAndState } from '../logic_utils'
 import type { ShoppingListEntry, Food, Unit } from '@/openapi'
 
 vi.mock('@/stores/UserPreferenceStore', () => ({
@@ -261,6 +261,80 @@ describe('aggregateShoppingEntriesByUnit', () => {
       expect(result).toHaveLength(2)
       expect(result[0].unit?.name).toBe('g')
       expect(result[1].unit?.name).toBe('Stück')
+    })
+  })
+
+  describe('aggregateShoppingEntriesByUnitAndState', () => {
+    it('应该按单位+勾选状态+延迟状态分别聚合并保留独立分组', () => {
+      const entries = [
+        createMockEntry(1, tomato, gramUnit, 500, false, false, 1),
+        createMockEntry(2, tomato, gramUnit, 300, true, false, 2),
+        createMockEntry(3, tomato, gramUnit, 200, true, true, 3),
+        createMockEntry(4, tomato, pieceUnit, 2, false, false, 4),
+      ]
+
+      const result = aggregateShoppingEntriesByUnitAndState(entries)
+
+      expect(result).toHaveLength(4)
+      expect(result.find(r => r.unit?.id === gramUnit.id && !r.checked && !r.delayed)?.amount).toBe(500)
+      expect(result.find(r => r.unit?.id === gramUnit.id && r.checked && !r.delayed)?.amount).toBe(300)
+      expect(result.find(r => r.unit?.id === gramUnit.id && r.checked && r.delayed)?.amount).toBe(200)
+      expect(result.find(r => r.unit?.id === pieceUnit.id && !r.checked && !r.delayed)?.amount).toBe(2)
+    })
+
+    it('相同单位相同状态的条目应该被合并', () => {
+      const entries = [
+        createMockEntry(1, tomato, gramUnit, 500, false, false, 1),
+        createMockEntry(2, tomato, gramUnit, 300, false, false, 2),
+      ]
+
+      const result = aggregateShoppingEntriesByUnitAndState(entries)
+
+      expect(result).toHaveLength(1)
+      expect(result[0].amount).toBe(800)
+      expect(result[0].checked).toBe(false)
+      expect(result[0].delayed).toBe(false)
+    })
+
+    it('不同单位的条目即使状态相同也不应该被合并', () => {
+      const entries = [
+        createMockEntry(1, tomato, gramUnit, 500, false, false, 1),
+        createMockEntry(2, tomato, pieceUnit, 3, false, false, 2),
+      ]
+
+      const result = aggregateShoppingEntriesByUnitAndState(entries)
+
+      expect(result).toHaveLength(2)
+    })
+
+    it('应该按原始顺序排序', () => {
+      const entries = [
+        createMockEntry(1, tomato, gramUnit, 500, false, false, 5),
+        createMockEntry(2, tomato, pieceUnit, 3, false, false, 1),
+        createMockEntry(3, tomato, gramUnit, 200, true, false, 3),
+      ]
+
+      const result = aggregateShoppingEntriesByUnitAndState(entries)
+
+      expect(result).toHaveLength(3)
+      expect(result[0].unit?.id).toBe(pieceUnit.id)
+      expect(result[1].unit?.id).toBe(gramUnit.id)
+      expect(result[1].checked).toBe(true)
+      expect(result[2].unit?.id).toBe(gramUnit.id)
+      expect(result[2].checked).toBe(false)
+    })
+
+    it('数量为0或负数的条目应该被忽略', () => {
+      const entries = [
+        createMockEntry(1, tomato, gramUnit, 500, false, false, 1),
+        createMockEntry(2, tomato, gramUnit, 0, false, false, 2),
+        createMockEntry(3, tomato, gramUnit, -100, false, false, 3),
+      ]
+
+      const result = aggregateShoppingEntriesByUnitAndState(entries)
+
+      expect(result).toHaveLength(1)
+      expect(result[0].amount).toBe(500)
     })
   })
 })

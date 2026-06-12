@@ -13,7 +13,9 @@ import {
 } from "@/openapi";
 import {computed, ref, shallowRef, triggerRef} from "vue";
 import {
-    IShoppingExportEntry,
+    AggregationLevel,
+    IAggregateSnapshot,
+    AggregateOperationResult,
     IShoppingList,
     IShoppingListCategory,
     IShoppingListFood,
@@ -25,7 +27,7 @@ import {
 } from "@/types/Shopping";
 import {ErrorMessageType, PreparedMessage, useMessageStore} from "@/stores/MessageStore";
 import {useUserPreferenceStore} from "@/stores/UserPreferenceStore";
-import {aggregateShoppingEntriesByUnit, isDelayed, isEntryVisible} from "@/utils/logic_utils";
+import {aggregateShoppingEntriesByUnit, aggregateShoppingEntriesByUnitAndState, isDelayed, isEntryVisible} from "@/utils/logic_utils";
 import {DateTime} from "luxon";
 
 const _STORE_ID = "shopping_store"
@@ -574,7 +576,9 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
                 structure.categories.get(groupingKey).foods.set(entry.food.id, {
                     food: entry.food,
                     entries: new Map<number, ShoppingListEntry>,
-                    aggregatedAmounts: []
+                    aggregatedAmounts: [],
+                    aggregationLevel: AggregationLevel.FULL,
+                    aggregateHistory: [],
                 } as IShoppingListFood)
             }
             structure.categories.get(groupingKey).foods.get(entry.food.id).entries.set(entry.id, entry)
@@ -735,6 +739,127 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
         })
     }
 
+    /**
+     * Increase aggregation level for a food.
+     * Level 0 → Level 1 → Level 2
+     * Saves a snapshot of previous state to history for undo functionality.
+     * @param foodId ID of the food to aggregate
+     */
+    function aggregateFood(foodId: number): AggregateOperationResult | null {
+        let result: AggregateOperationResult | null = null
+
+        entriesByGroup.value.forEach(category => {
+            const food = category.foods.get(foodId)
+            if (food && food.aggregationLevel < AggregationLevel.FULL) {
+                const snapshot: IAggregateSnapshot = {
+                    timestamp: new Date(),
+                    aggregationLevel: food.aggregationLevel,
+                }
+                food.aggregateHistory.push(snapshot)
+                food.aggregationLevel = (food.aggregationLevel + 1) as AggregationLevel
+
+                result = {
+                    success: true,
+                    foodId,
+                    previousState: snapshot,
+                }
+            }
+        })
+
+        return result
+    }
+
+    /**
+     * Undo the last aggregate operation for a food, restoring previous aggregation level.
+     * @param foodId ID of the food to undo aggregation
+     */
+    function undoAggregateFood(foodId: number): IAggregateSnapshot | null {
+        let result: IAggregateSnapshot | null = null
+
+        entriesByGroup.value.forEach(category => {
+            const food = category.foods.get(foodId)
+            if (food && food.aggregateHistory.length > 0) {
+                const snapshot = food.aggregateHistory.pop()!
+                food.aggregationLevel = snapshot.aggregationLevel
+                result = snapshot
+            }
+        })
+
+        return result
+    }
+
+    /**
+     * Check if a food has any aggregate history (can undo)
+     * @param foodId ID of the food to check
+     */
+    function canUndoAggregate(foodId: number): boolean {
+        let canUndo = false
+
+        entriesByGroup.value.forEach(category => {
+            const food = category.foods.get(foodId)
+            if (food && food.aggregateHistory.length > 0) {
+                canUndo = true
+            }
+        })
+
+        return canUndo
+    }
+
+    /**
+     * Check if a food can be further aggregated (hasn't reached max level)
+     * @param foodId ID of the food to check
+     */
+    function canAggregateFood(foodId: number): boolean {
+        let canAggregate = false
+
+        entriesByGroup.value.forEach(category => {
+            const food = category.foods.get(foodId)
+            if (food && food.aggregationLevel < AggregationLevel.FULL) {
+                const entryCount = food.entries.size
+                if (entryCount > 1) {
+                    canAggregate = true
+                }
+            }
+        })
+
+        return canAggregate
+    }
+
+    /**
+     * Get display amounts for a food based on its current aggregation level.
+     * @param food The shopping list food
+     * @returns Array of ShoppingLineAmount for display
+     */
+    function getDisplayAmountsForFood(food: IShoppingListFood): ShoppingLineAmount[] {
+        const entriesArray = Array.from(food.entries.values())
+
+        switch (food.aggregationLevel) {
+            case AggregationLevel.NONE:
+                return entriesArray
+                    .filter(e => e.amount > 0)
+                    .map(entry => ({
+                        key: String(entry.id),
+                        amount: entry.amount,
+                        unit: entry.unit ?? null,
+                        checked: entry.checked ?? false,
+                        delayed: isDelayed(entry),
+                    }))
+                    .sort((a, b) => {
+                        const aOrder = entriesArray.find(e => String(e.id) === a.key)?.order ?? Number.MAX_SAFE_INTEGER
+                        const bOrder = entriesArray.find(e => String(e.id) === b.key)?.order ?? Number.MAX_SAFE_INTEGER
+                        if (aOrder !== bOrder) return aOrder - bOrder
+                        return (a.unit?.name ?? '').localeCompare(b.unit?.name ?? '')
+                    })
+
+            case AggregationLevel.SEMI:
+                return aggregateShoppingEntriesByUnitAndState(entriesArray)
+
+            case AggregationLevel.FULL:
+            default:
+                return aggregateShoppingEntriesByUnit(entriesArray)
+        }
+    }
+
     function deleteShoppingListRecipe(shopping_list_recipe_id: number) {
         const api = new ApiApi()
 
@@ -885,6 +1010,11 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
         updateCategories,
         updateEntryShoppingLists,
         loadShoppingLists,
+        aggregateFood,
+        undoAggregateFood,
+        canUndoAggregate,
+        canAggregateFood,
+        getDisplayAmountsForFood,
     }
 })
 

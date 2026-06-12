@@ -44,10 +44,22 @@
         </template>
 
         <template v-slot:[checkBtnSlot]>
-            <div class="ps-3 pe-3" @click.native.stop="useShoppingStore().setEntriesCheckedState(entries, !isChecked, true);">
-                <v-btn color="success" size="large"
-                       :class="{'btn-success': !isChecked, 'btn-warning': isChecked}" :icon="actionButtonIcon" variant="plain">
-                </v-btn>
+            <div class="d-flex align-items-center">
+                <div v-if="canAggregate" class="ps-2 pe-2" @click.native.stop="handleAggregate">
+                    <v-btn color="primary" size="small" icon="fa-solid fa-layer-group" variant="plain"
+                           title="聚合">
+                    </v-btn>
+                </div>
+                <div v-if="canUndoAggregate" class="ps-2 pe-2" @click.native.stop="handleUndoAggregate">
+                    <v-btn color="info" size="small" icon="fa-solid fa-rotate-left" variant="plain"
+                           title="撤销聚合">
+                    </v-btn>
+                </div>
+                <div class="ps-3 pe-3" @click.native.stop="useShoppingStore().setEntriesCheckedState(entries, !isChecked, true);">
+                    <v-btn color="success" size="large"
+                           :class="{'btn-success': !isChecked, 'btn-warning': isChecked}" :icon="actionButtonIcon" variant="plain">
+                    </v-btn>
+                </div>
             </div>
         </template>
 
@@ -123,6 +135,35 @@ const actionButtonIcon = computed(() => {
     return 'fa-solid fa-check'
 })
 
+/**
+ * whether the current food can be further aggregated
+ */
+const canAggregate = computed(() => {
+    const store = useShoppingStore()
+    return store.canAggregateFood(props.shoppingListFood.food.id!)
+})
+
+/**
+ * whether the current food can have its aggregation undone
+ */
+const canUndoAggregate = computed(() => {
+    return props.shoppingListFood.aggregateHistory && props.shoppingListFood.aggregateHistory.length > 0
+})
+
+/**
+ * handler for aggregate button
+ */
+function handleAggregate() {
+    useShoppingStore().aggregateFood(props.shoppingListFood.food.id!)
+}
+
+/**
+ * handler for undo aggregate button
+ */
+function handleUndoAggregate() {
+    useShoppingStore().undoAggregateFood(props.shoppingListFood.food.id!)
+}
+
 
 const shoppingList = computed(() => {
     const lists = [] as ShoppingList[]
@@ -141,12 +182,14 @@ const shoppingList = computed(() => {
 
 
 /**
- * calculate the amounts for the given line
- * uses pre-aggregated amounts from the store, which groups entries by unit
- * regardless of their individual checked/delayed states
+ * calculate the amounts for the given line based on current aggregation level
+ * Level 0: each entry shown individually
+ * Level 1: grouped by unit + checked + delayed state
+ * Level 2: grouped by unit only (full aggregation)
  */
 const amounts = computed((): ShoppingLineAmount[] => {
-    return props.shoppingListFood.aggregatedAmounts || []
+    const store = useShoppingStore()
+    return store.getDisplayAmountsForFood(props.shoppingListFood)
 })
 
 /**

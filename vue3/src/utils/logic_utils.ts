@@ -81,7 +81,7 @@ export function isShoppingCategoryVisible(category: IShoppingListCategory) {
 }
 
 /**
- * Aggregates shopping list entries by unit, summing amounts while preserving checked and delayed states.
+ * Aggregates shopping list entries by unit only (full aggregation).
  * Entries with the same unit are merged regardless of their individual checked/delayed states.
  * Checked state: true only if ALL entries are checked (logical AND)
  * Delayed state: true if ANY entry is delayed (logical OR)
@@ -134,6 +134,64 @@ export function aggregateShoppingEntriesByUnit(entries: ShoppingListEntry[]): Sh
             unit: group.unit,
             checked: group.allChecked,
             delayed: group.anyDelayed,
+        }));
+}
+
+/**
+ * Aggregates shopping list entries by unit + checked + delayed state (semi aggregation).
+ * Only entries with the same unit, same checked state, and same delayed state are merged.
+ * This matches the original behavior before full aggregation was introduced.
+ * @param entries Array of ShoppingListEntry to aggregate
+ * @returns Array of aggregated ShoppingLineAmount
+ */
+export function aggregateShoppingEntriesByUnitAndState(entries: ShoppingListEntry[]): ShoppingLineAmount[] {
+    const groups = new Map<string, {
+        amount: number;
+        unit: Unit | null;
+        checked: boolean;
+        delayed: boolean;
+        minOrder: number;
+    }>();
+
+    entries.forEach(entry => {
+        if (entry.amount <= 0) return;
+
+        const unitKey = entry.unit?.id ?? null;
+        const checked = entry.checked ?? false;
+        const delayed = isDelayed(entry);
+        const key = `${unitKey}_${checked}_${delayed}`;
+
+        const existing = groups.get(key);
+
+        if (existing) {
+            existing.amount += entry.amount;
+            if ((entry.order ?? Number.MAX_SAFE_INTEGER) < existing.minOrder) {
+                existing.minOrder = entry.order ?? Number.MAX_SAFE_INTEGER;
+            }
+        } else {
+            groups.set(key, {
+                amount: entry.amount,
+                unit: entry.unit ?? null,
+                checked,
+                delayed,
+                minOrder: entry.order ?? Number.MAX_SAFE_INTEGER,
+            });
+        }
+    });
+
+    return Array.from(groups.values())
+        .sort((a, b) => {
+            if (a.minOrder !== b.minOrder) {
+                return a.minOrder - b.minOrder;
+            }
+            return (a.unit?.name ?? '').localeCompare(b.unit?.name ?? '');
+        })
+        .map(group => ({
+            key: `${group.unit?.id ?? 'null'}_${group.checked}_${group.delayed}`,
+            amount: group.amount,
+            unit: group.unit,
+            checked: group.checked,
+            delayed: group.delayed,
         }));
 }
 

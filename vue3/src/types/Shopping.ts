@@ -26,12 +26,43 @@ export interface IShoppingListCategory {
 }
 
 /**
+ * Aggregation level for shopping list food entries
+ * 0: Not aggregated - each entry shown individually
+ * 1: Semi-aggregated - grouped by unit + checked + delayed state
+ * 2: Fully aggregated - grouped by unit only (all states combined)
+ */
+export enum AggregationLevel {
+    NONE = 0,
+    SEMI = 1,
+    FULL = 2,
+}
+
+/**
  * food in shopping list with its associated entries
  */
 export interface IShoppingListFood {
     food: Food,
     entries: Map<number, ShoppingListEntry>,
-    aggregatedAmounts: ShoppingLineAmount[]
+    aggregatedAmounts: ShoppingLineAmount[],
+    aggregationLevel: AggregationLevel,
+    aggregateHistory: IAggregateSnapshot[],
+}
+
+/**
+ * snapshot of aggregate state for undo functionality
+ */
+export interface IAggregateSnapshot {
+    timestamp: Date,
+    aggregationLevel: AggregationLevel,
+}
+
+/**
+ * result of performing an aggregate operation
+ */
+export type AggregateOperationResult = {
+    success: boolean,
+    foodId: number,
+    previousState: IAggregateSnapshot,
 }
 
 export type ShoppingLineAmount = {
