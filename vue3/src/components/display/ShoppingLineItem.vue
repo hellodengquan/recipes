@@ -142,44 +142,11 @@ const shoppingList = computed(() => {
 
 /**
  * calculate the amounts for the given line
- * can combine 1 to n entries with the same unit
- * can contain more 0 to n different entries for different units
+ * uses pre-aggregated amounts from the store, which groups entries by unit
+ * regardless of their individual checked/delayed states
  */
 const amounts = computed((): ShoppingLineAmount[] => {
-    let unitAmounts: ShoppingLineAmount[] = []
-
-    for (let i in entries.value) {
-        let e = entries.value[i]
-
-
-        let unit = -1
-        if (e.unit !== undefined && e.unit !== null) {
-            unit = e.unit.id!
-        }
-
-        if (e.amount > 0) {
-
-            let uaMerged = false
-            unitAmounts.forEach(ua => {
-                if (((ua.unit == null && e.unit == null) || (ua.unit != null && ua.unit.id! == unit)) && ua.checked == e.checked && ua.delayed == isDelayed(e)) {
-                    ua.amount += e.amount
-                    uaMerged = true
-                }
-            })
-
-            if (!uaMerged) {
-                unitAmounts.push({
-                    key: `${unit}_${e.checked}_${isDelayed(e)}`,
-                    amount: e.amount,
-                    unit: e.unit,
-                    checked: e.checked,
-                    delayed: isDelayed(e)
-                } as ShoppingLineAmount)
-            }
-        }
-    }
-
-    return unitAmounts
+    return props.shoppingListFood.aggregatedAmounts || []
 })
 
 /**

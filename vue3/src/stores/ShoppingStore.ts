@@ -25,7 +25,7 @@ import {
 } from "@/types/Shopping";
 import {ErrorMessageType, PreparedMessage, useMessageStore} from "@/stores/MessageStore";
 import {useUserPreferenceStore} from "@/stores/UserPreferenceStore";
-import {isDelayed, isEntryVisible} from "@/utils/logic_utils";
+import {aggregateShoppingEntriesByUnit, isDelayed, isEntryVisible} from "@/utils/logic_utils";
 import {DateTime} from "luxon";
 
 const _STORE_ID = "shopping_store"
@@ -124,6 +124,7 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
                     })
                 )
                 food.entries = sortedEntries
+                food.aggregatedAmounts = aggregateShoppingEntriesByUnit(Array.from(food.entries.values()))
             })
         })
 
@@ -172,16 +173,21 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
         // predictive update of entry directly in render structure
         entriesByGroup.value.forEach((sLC, sLCIndex) => {
             sLC.foods.forEach(sLF => {
+                let updated = false
                 sLF.entries.forEach(sLE => {
                     if (sLE.id == entry.id) {
                         sLE.checked = entry.checked
                         sLE.shoppingLists = entry.shoppingLists
+                        updated = true
 
                         if (!isEntryVisible(sLE, useUserPreferenceStore().deviceSettings)) {
                             sLF.entries.delete(sLE.id!)
                         }
                     }
                 })
+                if (updated) {
+                    sLF.aggregatedAmounts = aggregateShoppingEntriesByUnit(Array.from(sLF.entries.values()))
+                }
                 if (sLF.entries.size == 0) {
                     sLC.foods.delete(sLF.food.id!)
                 }
@@ -489,12 +495,16 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
 
             entriesByGroup.value.forEach(category => {
                 if (category.name == categoryName) {
-                    category.foods.get(object.food!.id!)?.entries.delete(object.id!)
-                    if (category.foods.get(object.food!.id!)?.entries.size == 0) {
-                        category.foods.delete(object.food!.id!)
-                        triggerRef(entriesByGroup)
+                    const food = category.foods.get(object.food!.id!)
+                    if (food) {
+                        food.entries.delete(object.id!)
+                        if (food.entries.size == 0) {
+                            category.foods.delete(object.food!.id!)
+                            triggerRef(entriesByGroup)
+                        } else {
+                            food.aggregatedAmounts = aggregateShoppingEntriesByUnit(Array.from(food.entries.values()))
+                        }
                     }
-
                 }
             })
 
@@ -563,7 +573,8 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
             if (!structure.categories.get(groupingKey).foods.has(entry.food.id)) {
                 structure.categories.get(groupingKey).foods.set(entry.food.id, {
                     food: entry.food,
-                    entries: new Map<number, ShoppingListEntry>
+                    entries: new Map<number, ShoppingListEntry>,
+                    aggregatedAmounts: []
                 } as IShoppingListFood)
             }
             structure.categories.get(groupingKey).foods.get(entry.food.id).entries.set(entry.id, entry)

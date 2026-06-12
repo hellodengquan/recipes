@@ -30,7 +30,8 @@ export interface IShoppingListCategory {
  */
 export interface IShoppingListFood {
     food: Food,
-    entries: Map<number, ShoppingListEntry>
+    entries: Map<number, ShoppingListEntry>,
+    aggregatedAmounts: ShoppingLineAmount[]
 }
 
 export type ShoppingLineAmount = {
