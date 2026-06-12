@@ -69,6 +69,15 @@
         </v-col>
     </v-row>
 
+    <v-row class="mt-2">
+        <v-col>
+            <meal-plan-ingredient-forecast
+                :from-date="forecastFromDate"
+                :to-date="forecastToDate"
+            ></meal-plan-ingredient-forecast>
+        </v-col>
+    </v-row>
+
 </template>
 
 
@@ -81,6 +90,7 @@ import {DateTime} from "luxon";
 import {homePageCols} from "@/utils/breakpoint_utils";
 import ModelEditDialog from "@/components/dialogs/ModelEditDialog.vue";
 import {useRouter} from "vue-router";
+import MealPlanIngredientForecast from "@/components/display/MealPlanIngredientForecast.vue";
 
 const router = useRouter()
 const {name} = useDisplay()
@@ -119,6 +129,9 @@ const meal_plan_grid = computed(() => {
 
     return grid
 })
+
+const forecastFromDate = computed(() => DateTime.now().toJSDate())
+const forecastToDate = computed(() => DateTime.now().plus({days: 14}).toJSDate())
 
 let mealPlanWindows = computed(() => {
     let windows = [] as Array<Array<MealPlanGridItem>>

@@ -86,6 +86,7 @@ from cookbook.helper.permission_helper import (CustomIsAdmin, CustomIsOwner, Cus
 from cookbook.helper.recipe_search import RecipeSearch
 from cookbook.helper.recipe_url_import import clean_dict, get_from_youtube_scraper, get_images_from_soup
 from cookbook.helper.shopping_helper import RecipeShoppingEditor
+from cookbook.helper.meal_plan_forecast_helper import calculate_meal_plan_forecast, serialize_forecast_entry
 from cookbook.models import (Automation, BookmarkletImport, ConnectorConfig, CookLog, CustomFilter, ExportLog, Food,
                              FoodInheritField, FoodProperty, ImportLog, Ingredient,
                              InviteLink, Keyword, MealPlan, MealType, Property, PropertyType, Recipe, RecipeBook,
@@ -1535,6 +1536,61 @@ class MealPlanViewSet(LoggingMixin, viewsets.ModelViewSet):
         from_date = self.request.query_params.get('from_date', timezone.now() - datetime.timedelta(days=90))
         to_date = self.request.query_params.get('to_date', timezone.now() + datetime.timedelta(days=360))
         return meal_plans_to_ical(self.get_queryset(), f'meal_plan_{from_date}-{to_date}.ics')
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(name='from_date', description=_('Forecast start date (inclusive). Defaults to today.'), type=str, required=False),
+            OpenApiParameter(name='to_date', description=_('Forecast end date (inclusive). Defaults to 30 days from today.'), type=str, required=False),
+        ],
+        responses={200: OpenApiTypes.OBJECT}
+    )
+    @decorators.action(detail=False, methods=['get'])
+    def ingredient_forecast(self, request):
+        """
+        Calculate ingredient forecast for meal plans within the given date range.
+        Returns ingredients categorized into three statuses:
+        - status_available: In stock, not required by any meal plan (已备)
+        - status_reserved: In stock, but will be used by upcoming meal plans (即将占用)
+        - status_to_buy: Not enough stock, needs to be purchased (需购买)
+        """
+        from_date_str = request.query_params.get('from_date')
+        to_date_str = request.query_params.get('to_date')
+
+        from_date = None
+        to_date = None
+
+        if from_date_str:
+            try:
+                from_date = datetime.datetime.strptime(from_date_str, '%Y-%m-%d').date()
+            except ValueError:
+                try:
+                    from_date = timezone.datetime.fromisoformat(from_date_str).date()
+                except ValueError:
+                    pass
+
+        if to_date_str:
+            try:
+                to_date = datetime.datetime.strptime(to_date_str, '%Y-%m-%d').date()
+            except ValueError:
+                try:
+                    to_date = timezone.datetime.fromisoformat(to_date_str).date()
+                except ValueError:
+                    pass
+
+        results = calculate_meal_plan_forecast(
+            user=request.user,
+            user_space=request.user_space,
+            space=request.space,
+            from_date=from_date,
+            to_date=to_date,
+        )
+
+        serialized = [serialize_forecast_entry(e) for e in results]
+
+        return Response({
+            'count': len(serialized),
+            'results': serialized,
+        })
 
 
 class AutoPlanViewSet(LoggingMixin, mixins.CreateModelMixin, viewsets.GenericViewSet):

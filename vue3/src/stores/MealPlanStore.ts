@@ -3,6 +3,7 @@ import {ApiApi, MealPlan} from "@/openapi";
 import {computed, ref} from "vue";
 import {DateTime} from "luxon";
 import {ErrorMessageType, MessageType, PreparedMessage, useMessageStore} from "@/stores/MessageStore";
+import {IForecastFoodEntry, IForecastResponse} from "@/types/MealPlanForecast";
 
 
 const _STORE_ID = "meal_plan_store"
@@ -18,6 +19,10 @@ export const useMealPlanStore = defineStore(_STORE_ID, () => {
 
     const lastStartDate = ref(new Date())
     const lastEndDate = ref(new Date())
+
+    const forecastLoading = ref(false)
+    const forecastData = ref<IForecastFoodEntry[]>([])
+    const lastForecastDates = ref<{from: Date, to: Date} | null>(null)
 
     const planList = computed(() => {
         let plan_list = [] as MealPlan[]
@@ -142,6 +147,43 @@ export const useMealPlanStore = defineStore(_STORE_ID, () => {
         })
     }
 
+    async function loadForecast(from_date: Date, to_date: Date, forceRefresh: boolean = false): Promise<IForecastFoodEntry[]> {
+        if (!forceRefresh
+            && lastForecastDates.value
+            && lastForecastDates.value.from.getTime() === from_date.getTime()
+            && lastForecastDates.value.to.getTime() === to_date.getTime()
+            && forecastData.value.length > 0) {
+            return forecastData.value
+        }
+
+        forecastLoading.value = true
+        lastForecastDates.value = {from: from_date, to: to_date}
+
+        try {
+            const api = new (ApiApi as any)()
+            const response = await api.axiosInstance.get('/api/meal-plan/ingredient_forecast/', {
+                params: {
+                    from_date: DateTime.fromJSDate(from_date).toISODate(),
+                    to_date: DateTime.fromJSDate(to_date).toISODate(),
+                }
+            })
+            const data = response.data as IForecastResponse
+            forecastData.value = data.results || []
+            return forecastData.value
+        } catch (err) {
+            useMessageStore().addError(ErrorMessageType.FETCH_ERROR, err)
+            forecastData.value = []
+            return []
+        } finally {
+            forecastLoading.value = false
+        }
+    }
+
+    function invalidateForecast() {
+        lastForecastDates.value = null
+        forecastData.value = []
+    }
+
     // function updateClientSettings(settings) {
     //     this.settings = settings
     //     localStorage.setItem(_LOCAL_STORAGE_KEY, JSON.stringify(this.settings))
@@ -160,7 +202,11 @@ export const useMealPlanStore = defineStore(_STORE_ID, () => {
     //         return JSON.parse(s)
     //     }
     // }
-    return {plans, currently_updating, planList, loading, refreshFromAPI, createObject, updateObject, deleteObject, refreshLastUpdatedPeriod, createOrUpdate}
+    return {
+        plans, currently_updating, planList, loading,
+        refreshFromAPI, createObject, updateObject, deleteObject, refreshLastUpdatedPeriod, createOrUpdate,
+        forecastLoading, forecastData, loadForecast, invalidateForecast
+    }
 })
 
 // enable hot reload for store

@@ -35,6 +35,27 @@
                 </calendar-view>
             </v-card>
 
+            <v-card class="mt-4">
+                <v-card-text class="pa-0">
+                    <v-expansion-panels variant="accordion">
+                        <v-expansion-panel>
+                            <v-expansion-panel-title>
+                                <div class="d-flex align-center">
+                                    <v-icon icon="fa-solid fa-kitchen-set" class="me-2"></v-icon>
+                                    <span class="font-weight-medium">{{ $t('MealPlan_IngredientForecast') }}</span>
+                                </div>
+                            </v-expansion-panel-title>
+                            <v-expansion-panel-text class="pa-0">
+                                <meal-plan-ingredient-forecast
+                                    :from-date="forecastFromDate"
+                                    :to-date="forecastToDate"
+                                ></meal-plan-ingredient-forecast>
+                            </v-expansion-panel-text>
+                        </v-expansion-panel>
+                    </v-expansion-panels>
+                </v-card-text>
+            </v-card>
+
 
             <model-edit-dialog model="MealPlan" v-model="newPlanDialog" :itemDefaults="newPlanDialogDefaultItem" :close-after-create="false"
                                @create="(arg: any) => useMealPlanStore().plans.set(arg.id, arg)"></model-edit-dialog>
@@ -59,6 +80,7 @@ import {MealPlan} from "@/openapi";
 import {useUserPreferenceStore} from "@/stores/UserPreferenceStore";
 import MealPlanCalendarHeader from "@/components/display/MealPlanCalendarHeader.vue";
 import {useI18n} from "vue-i18n";
+import MealPlanIngredientForecast from "@/components/display/MealPlanIngredientForecast.vue";
 
 const {lgAndUp} = useDisplay()
 const {locale} = useI18n()
@@ -96,6 +118,17 @@ const calendarItemHeight = computed(() => {
     } else {
         return '1.6rem'
     }
+})
+
+const forecastFromDate = computed(() => DateTime.fromJSDate(calendarDate.value).toJSDate())
+const forecastToDate = computed(() => {
+    let daysInPeriod = 14
+    if (useUserPreferenceStore().deviceSettings.mealplan_displayPeriod == 'month') {
+        daysInPeriod = 31
+    } else if (useUserPreferenceStore().deviceSettings.mealplan_displayPeriod == 'year') {
+        daysInPeriod = 30
+    }
+    return DateTime.fromJSDate(calendarDate.value).plus({days: daysInPeriod}).toJSDate()
 })
 
 /**
