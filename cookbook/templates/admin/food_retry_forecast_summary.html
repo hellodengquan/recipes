@@ -1,0 +1,107 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block content %}
+<div id="content-main">
+    <div class="module">
+        <h2>{% trans "Filters" %}</h2>
+        <form method="get" class="form-inline">
+            <div class="form-row">
+                <label for="id_min_limit">{% trans "Min Retry Limit" %}:</label>
+                <input type="number" id="id_min_limit" name="min_limit" 
+                       value="{{ min_limit|default:'' }}" min="0"
+                       placeholder="{% trans 'e.g. 3' %}">
+            </div>
+            <div class="form-row">
+                <label for="id_category">{% trans "Supermarket Category" %}:</label>
+                <select id="id_category" name="category">
+                    <option value="">{% trans "All categories" %}</option>
+                    {% for cat in categories %}
+                        <option value="{{ cat.id }}" 
+                                {% if category_id == cat.id %}selected{% endif %}>
+                            {{ cat.name }}
+                        </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="submit-row">
+                <input type="submit" value="{% trans 'Filter' %}" class="button">
+                <a href="{% url 'admin:cookbook_food_retry_forecast_summary' %}" 
+                   class="button">{% trans "Reset" %}</a>
+            </div>
+        </form>
+    </div>
+
+    <div class="module">
+        <h2>
+            {% blocktrans count counter=total_count %}
+            {{ total_count }} food with non-default retry limit
+            {% plural %}
+            {{ total_count }} foods with non-default retry limits
+            {% endblocktrans %}
+        </h2>
+        <p class="small">
+            {% trans "Showing only foods where reserve_retry_limit != 1 (default). " %}
+            {% trans "Hit count shows total times the retry limit was reached in the last 7 days." %}
+        </p>
+
+        {% if foods_with_hits %}
+        <table>
+            <thead>
+                <tr>
+                    <th>{% trans "Food" %}</th>
+                    <th>{% trans "Space" %}</th>
+                    <th>{% trans "Retry Limit" %}</th>
+                    <th>{% trans "7-day Limit Hit Count" %}</th>
+                    <th>{% trans "Category" %}</th>
+                    <th>{% trans "Actions" %}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in foods_with_hits %}
+                <tr class="{% cycle 'row1' 'row2' %}">
+                    <td>
+                        <a href="{% url 'admin:cookbook_food_change' item.food.id %}">
+                            {{ item.food.name }}
+                        </a>
+                    </td>
+                    <td>{{ item.food.space.name }}</td>
+                    <td>
+                        {% if item.food.reserve_retry_limit > 1 %}
+                            <span style="color: green; font-weight: bold;">
+                                {{ item.food.reserve_retry_limit }}
+                            </span>
+                        {% else %}
+                            <span style="color: red; font-weight: bold;">
+                                {{ item.food.reserve_retry_limit }}
+                            </span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if item.hit_count_7d > 0 %}
+                            <span style="color: red; font-weight: bold;">
+                                {{ item.hit_count_7d }}
+                            </span>
+                        {% else %}
+                            <span style="color: #999;">0</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ item.food.supermarket_category.name|default:"-" }}</td>
+                    <td>
+                        <a href="{% url 'admin:cookbook_food_change' item.food.id %}" 
+                           class="changelink">{% trans "Edit" %}</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+            <p class="errornote">
+                {% trans "No foods found with non-default retry limits matching your filters." %}
+            </p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block sidebar %}{% endblock %}

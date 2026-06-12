@@ -1429,6 +1429,40 @@ class InventoryLog(models.Model, PermissionModelMixin):
         ordering = ('created_at',)
 
 
+class ForecastLog(models.Model, PermissionModelMixin):
+    STATUS_SUCCESS = 'success'
+    STATUS_CONFLICT = 'conflict'
+    STATUS_CHOICES = [
+        (STATUS_SUCCESS, _('Success')),
+        (STATUS_CONFLICT, _('Conflict')),
+    ]
+
+    food = models.ForeignKey(Food, on_delete=models.SET_NULL, null=True, blank=True)
+    space = models.ForeignKey(Space, on_delete=models.CASCADE)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_SUCCESS)
+    retry_count = models.PositiveSmallIntegerField(default=0)
+    hit_limit = models.BooleanField(default=False)
+    reserve_retry_limit = models.PositiveSmallIntegerField(default=1)
+
+    note = models.CharField(max_length=256, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = ScopedManager(space='space')
+
+    class Meta:
+        ordering = ('-created_at',)
+        indexes = [
+            models.Index(fields=['food', 'created_at']),
+            models.Index(fields=['hit_limit', 'created_at']),
+        ]
+
+    def __str__(self):
+        food_name = self.food.name if self.food else 'N/A'
+        return f'{self.created_at}: {food_name} - {self.status} (retry={self.retry_count})'
+
+
 class ShareLink(ExportModelOperationsMixin('share_link'), models.Model, PermissionModelMixin):
     recipe = models.ForeignKey(Recipe, on_delete=models.CASCADE)
     uuid = models.UUIDField(default=uuid.uuid4)

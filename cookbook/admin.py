@@ -12,7 +12,7 @@ from allauth.account.decorators import secure_admin_login
 
 from cookbook.managers import DICTIONARY
 
-from .models import (BookmarkletImport, Comment, CookLog, CustomFilter, Food, ImportLog, Ingredient, InviteLink,
+from .models import (BookmarkletImport, Comment, CookLog, CustomFilter, Food, ForecastLog, ImportLog, Ingredient, InviteLink,
                      Keyword, MealPlan, MealType, NutritionInformation, Property, PropertyType,
                      Recipe, RecipeBook, RecipeBookEntry, RecipeImport, SearchPreference, ShareLink,
                      ShoppingListEntry, ShoppingListRecipe, Space, Step, Storage,
@@ -288,6 +288,75 @@ class FoodAdmin(TreeAdmin):
         }),
     )
     actions = [sort_tree, enable_tree_sorting, disable_tree_sorting]
+
+    def get_urls(self):
+        from django.urls import path
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                'retry-forecast-summary/',
+                self.admin_site.admin_view(self.retry_forecast_summary_view),
+                name='cookbook_food_retry_forecast_summary',
+            ),
+        ]
+        return custom_urls + urls
+
+    def retry_forecast_summary_view(self, request):
+        from django.db.models import Count, Q
+        from django.utils import timezone
+        from django.template.response import TemplateResponse
+        from django.contrib.admin.views.main import ChangeList
+
+        seven_days_ago = timezone.now() - timezone.timedelta(days=7)
+
+        min_limit = request.GET.get('min_limit', '')
+        category_id = request.GET.get('category', '')
+
+        with scopes_disabled():
+            qs = Food.objects.exclude(reserve_retry_limit=1).order_by('-reserve_retry_limit', 'name')
+
+            if min_limit and min_limit.isdigit():
+                qs = qs.filter(reserve_retry_limit__gte=int(min_limit))
+
+            if category_id and category_id.isdigit():
+                qs = qs.filter(supermarket_category_id=int(category_id))
+
+            hit_counts = {}
+            log_qs = ForecastLog.objects.filter(
+                hit_limit=True,
+                created_at__gte=seven_days_ago,
+                food_id__in=qs.values_list('id', flat=True),
+            ).values('food_id').annotate(count=Count('id'))
+            for row in log_qs:
+                hit_counts[row['food_id']] = row['count']
+
+            foods_with_hits = []
+            for food in qs.select_related('space', 'supermarket_category'):
+                foods_with_hits.append({
+                    'food': food,
+                    'hit_count_7d': hit_counts.get(food.id, 0),
+                })
+
+            categories = SupermarketCategory.objects.all().order_by('name')
+
+            context = {
+                **self.admin_site.each_context(request),
+                'title': 'Food Reserve Retry Forecast Summary',
+                'foods_with_hits': foods_with_hits,
+                'total_count': len(foods_with_hits),
+                'min_limit': min_limit,
+                'category_id': int(category_id) if category_id and category_id.isdigit() else None,
+                'categories': categories,
+                'seven_days_ago': seven_days_ago,
+                'opts': self.model._meta,
+                'has_change_permission': self.has_change_permission(request),
+            }
+
+        return TemplateResponse(
+            request,
+            'admin/food_retry_forecast_summary.html',
+            context,
+        )
 
 
 admin.site.register(Food, FoodAdmin)

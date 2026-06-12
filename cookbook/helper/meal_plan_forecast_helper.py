@@ -158,10 +158,60 @@ def _compute_max_attempts(space, food_ids, last_conflict_food_id=None):
     return 1 + max(0, max_limit)
 
 
+def _write_forecast_logs(
+    space,
+    user,
+    food_ids,
+    status,
+    retry_count,
+    hit_limit,
+    conflict_food_id=None,
+    limits_by_food=None,
+    note=None,
+):
+    """
+    Write ForecastLog entries for each food involved in a reservation run.
+
+    Args:
+        space: Space object
+        user: User object (can be None)
+        food_ids: iterable of food_ids involved
+        status: 'success' or 'conflict'
+        retry_count: number of retries that actually occurred
+        hit_limit: whether the retry limit was hit (only meaningful for conflict)
+        conflict_food_id: which food triggered the conflict (if any)
+        limits_by_food: dict of {food_id: reserve_retry_limit} at time of operation
+        note: optional note string
+    """
+    from cookbook.models import ForecastLog
+
+    if limits_by_food is None:
+        limits_by_food = _get_food_reserve_retry_limits(space, set(food_ids))
+
+    logs = []
+    for fid in food_ids:
+        is_conflict_trigger = (fid == conflict_food_id)
+        logs.append(ForecastLog(
+            space=space,
+            food_id=fid,
+            created_by=user,
+            status=status,
+            retry_count=retry_count,
+            hit_limit=hit_limit and is_conflict_trigger if hit_limit else False,
+            reserve_retry_limit=limits_by_food.get(fid, 1),
+            note=note,
+        ))
+
+    if logs:
+        ForecastLog.objects.bulk_create(logs)
+
+
 def _reserve_inventory_with_optimistic_lock(
     space,
     household,
     reservations,
+    user=None,
+    write_logs=False,
 ):
     """
     Perform the actual inventory reservation (deduction) using
@@ -179,6 +229,8 @@ def _reserve_inventory_with_optimistic_lock(
             - food_id: int
             - base_unit_key: the unit key for matching
             - amount: Decimal amount to reserve (deduct from inventory)
+        user: the user performing the operation (for logging)
+        write_logs: if True, write ForecastLog entries for each food
 
     Returns:
         dict mapping (food_id, base_unit_key) -> Decimal of actually reserved amount
@@ -197,9 +249,14 @@ def _reserve_inventory_with_optimistic_lock(
 
     reserved_amounts = defaultdict(Decimal)
     conflict_food_id = None
+    total_retry_count = 0
+    final_hit_limit = False
+    final_limits = None
 
     while True:
         max_attempts = _compute_max_attempts(space, food_ids, conflict_food_id)
+        limits = _get_food_reserve_retry_limits(space, food_ids)
+        final_limits = limits
 
         for attempt in range(max_attempts):
             try:
@@ -261,13 +318,56 @@ def _reserve_inventory_with_optimistic_lock(
                             remaining -= deduct
                             reserved_amounts[key] += deduct
 
+                if write_logs:
+                    _write_forecast_logs(
+                        space=space,
+                        user=user,
+                        food_ids=food_ids,
+                        status='success',
+                        retry_count=total_retry_count + attempt,
+                        hit_limit=False,
+                        conflict_food_id=None,
+                        limits_by_food=final_limits,
+                    )
+
                 return dict(reserved_amounts)
 
             except ForecastConflictError as e:
                 conflict_food_id = e.food_id
                 if attempt >= max_attempts - 1:
+                    total_retry_count += attempt
+                    final_hit_limit = True
+                    if write_logs:
+                        _write_forecast_logs(
+                            space=space,
+                            user=user,
+                            food_ids=food_ids,
+                            status='conflict',
+                            retry_count=total_retry_count,
+                            hit_limit=True,
+                            conflict_food_id=conflict_food_id,
+                            limits_by_food=final_limits,
+                        )
                     raise
                 continue
+
+        total_retry_count += max_attempts
+        if conflict_food_id and limits.get(conflict_food_id, 1) == 0:
+            if write_logs:
+                _write_forecast_logs(
+                    space=space,
+                    user=user,
+                    food_ids=food_ids,
+                    status='conflict',
+                    retry_count=total_retry_count,
+                    hit_limit=True,
+                    conflict_food_id=conflict_food_id,
+                    limits_by_food=final_limits,
+                )
+            raise ForecastConflictError(
+                f'Retry limit exhausted for food {conflict_food_id} (limit=0)',
+                food_id=conflict_food_id,
+            )
 
     return dict(reserved_amounts)
 
@@ -493,6 +593,8 @@ def calculate_meal_plan_forecast(
             space=space,
             household=household,
             reservations=reservation_list,
+            user=user,
+            write_logs=True,
         )
 
     return list(forecast_by_food.values())
