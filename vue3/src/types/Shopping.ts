@@ -54,6 +54,7 @@ export interface IShoppingListFood {
 export interface IAggregateSnapshot {
     timestamp: Date,
     aggregationLevel: AggregationLevel,
+    entryCount: number,
 }
 
 /**

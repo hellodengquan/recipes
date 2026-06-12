@@ -28,6 +28,7 @@ import {
 import {ErrorMessageType, PreparedMessage, useMessageStore} from "@/stores/MessageStore";
 import {useUserPreferenceStore} from "@/stores/UserPreferenceStore";
 import {aggregateShoppingEntriesByUnit, aggregateShoppingEntriesByUnitAndState, isDelayed, isEntryVisible} from "@/utils/logic_utils";
+import {track} from "@/utils/analytics";
 import {DateTime} from "luxon";
 
 const _STORE_ID = "shopping_store"
@@ -743,6 +744,7 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
      * Increase aggregation level for a food.
      * Level 0 → Level 1 → Level 2
      * Saves a snapshot of previous state to history for undo functionality.
+     * Emits "aggregate.applied" telemetry event.
      * @param foodId ID of the food to aggregate
      */
     function aggregateFood(foodId: number): AggregateOperationResult | null {
@@ -751,12 +753,26 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
         entriesByGroup.value.forEach(category => {
             const food = category.foods.get(foodId)
             if (food && food.aggregationLevel < AggregationLevel.FULL) {
+                const entryCountBefore = getDisplayAmountsForFood(food).length
+
                 const snapshot: IAggregateSnapshot = {
                     timestamp: new Date(),
                     aggregationLevel: food.aggregationLevel,
+                    entryCount: entryCountBefore,
                 }
                 food.aggregateHistory.push(snapshot)
                 food.aggregationLevel = (food.aggregationLevel + 1) as AggregationLevel
+
+                const entryCountAfter = getDisplayAmountsForFood(food).length
+
+                track("aggregate.applied", {
+                    foodId,
+                    entryCountBefore,
+                    entryCountAfter,
+                    fromLevel: snapshot.aggregationLevel,
+                    toLevel: food.aggregationLevel,
+                    timestamp: snapshot.timestamp,
+                })
 
                 result = {
                     success: true,
@@ -771,6 +787,7 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
 
     /**
      * Undo the last aggregate operation for a food, restoring previous aggregation level.
+     * Emits "aggregate.undo" telemetry event with survival duration in ms.
      * @param foodId ID of the food to undo aggregation
      */
     function undoAggregateFood(foodId: number): IAggregateSnapshot | null {
@@ -781,6 +798,16 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
             if (food && food.aggregateHistory.length > 0) {
                 const snapshot = food.aggregateHistory.pop()!
                 food.aggregationLevel = snapshot.aggregationLevel
+
+                const survivalMs = Date.now() - snapshot.timestamp.getTime()
+                track("aggregate.undo", {
+                    foodId,
+                    survivalMs,
+                    entryCount: snapshot.entryCount,
+                    fromLevel: food.aggregationLevel + 1,
+                    toLevel: snapshot.aggregationLevel,
+                })
+
                 result = snapshot
             }
         })

@@ -2,7 +2,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useShoppingStore } from '../ShoppingStore'
 import { AggregationLevel } from '@/types/Shopping'
-import type { ShoppingListEntry, Food, Unit } from '@/openapi'
+import type { ShoppingListEntry, Food, Unit, SupermarketCategory } from '@/openapi'
+import { setAnalyticsTrackFn } from '@/utils/analytics'
+import type { AnalyticsEvent } from '@/utils/analytics'
 
 vi.mock('@/stores/MessageStore', () => ({
   useMessageStore: () => ({}),
@@ -59,9 +61,34 @@ describe('ShoppingStore 聚合与撤销功能', () => {
   const pieceUnit = createMockUnit(2, 'Stück')
   const tomato = createMockFood(101, 'Tomato')
 
+  let mockTrack: ReturnType<typeof vi.fn>
+
   beforeEach(() => {
     setActivePinia(createPinia())
+    mockTrack = vi.fn()
+    setAnalyticsTrackFn(mockTrack)
   })
+
+  function setupTestFood(store: ReturnType<typeof useShoppingStore>, entries: ShoppingListEntry[]) {
+    const food = {
+      food: tomato,
+      entries: new Map(entries.map(e => [e.id!, e])),
+      aggregatedAmounts: [],
+      aggregationLevel: AggregationLevel.NONE,
+      aggregateHistory: [],
+    }
+    // Pinia store 中 ref 可能被自动解包，尝试两种方式
+    const newCategories = [{
+      name: 'Test Category',
+      foods: new Map([[tomato.id!, food]]),
+    }]
+    if ('value' in store.entriesByGroup) {
+      (store.entriesByGroup as any).value = newCategories
+    } else {
+      (store.entriesByGroup as any) = newCategories
+    }
+    return food
+  }
 
   describe('三级聚合级别', () => {
     it('默认应该处于完全聚合级别（FULL）', () => {
@@ -323,6 +350,98 @@ describe('ShoppingStore 聚合与撤销功能', () => {
 
       expect(food.aggregationLevel).toBeLessThan(AggregationLevel.FULL)
       expect(food.entries.size).toBeGreaterThan(1)
+    })
+  })
+
+  describe('telemetry 埋点', () => {
+    it('聚合时应该上报 aggregate.applied 事件', () => {
+      const store = useShoppingStore()
+      const entries = [
+        createMockEntry(1, tomato, gramUnit, 500, false, false, 1),
+        createMockEntry(2, tomato, gramUnit, 300, false, false, 2),
+      ]
+      setupTestFood(store, entries)
+
+      const result = store.aggregateFood(tomato.id!)
+
+      expect(result).not.toBeNull()
+      expect(mockTrack).toHaveBeenCalledTimes(1)
+      const event: AnalyticsEvent = mockTrack.mock.calls[0][0]
+      expect(event.name).toBe('aggregate.applied')
+      expect(event.properties.foodId).toBe(tomato.id)
+      expect(event.properties.entryCountBefore).toBe(2)
+      expect(event.properties.entryCountAfter).toBe(1)
+      expect(event.properties.fromLevel).toBe(AggregationLevel.NONE)
+      expect(event.properties.toLevel).toBe(AggregationLevel.SEMI)
+      expect(event.timestamp).toBeInstanceOf(Date)
+    })
+
+    it('撤销时应该上报 aggregate.undo 事件并携带存活时间', () => {
+      const store = useShoppingStore()
+      const entries = [
+        createMockEntry(1, tomato, gramUnit, 500, false, false, 1),
+        createMockEntry(2, tomato, gramUnit, 300, false, false, 2),
+      ]
+      const food = setupTestFood(store, entries)
+
+      store.aggregateFood(tomato.id!)
+      mockTrack.mockClear()
+
+      const beforeUndo = Date.now()
+      store.undoAggregateFood(tomato.id!)
+      const afterUndo = Date.now()
+
+      expect(mockTrack).toHaveBeenCalledTimes(1)
+      const event: AnalyticsEvent = mockTrack.mock.calls[0][0]
+      expect(event.name).toBe('aggregate.undo')
+      expect(event.properties.foodId).toBe(tomato.id)
+      expect(event.properties.survivalMs).toBeGreaterThanOrEqual(0)
+      expect(event.properties.survivalMs).toBeLessThanOrEqual(afterUndo - beforeUndo + 100)
+      expect(event.properties.entryCount).toBe(2)
+      expect(event.properties.fromLevel).toBe(AggregationLevel.SEMI)
+      expect(event.properties.toLevel).toBe(AggregationLevel.NONE)
+    })
+
+    it('连续两次聚合后撤销应该上报正确的级别变化', () => {
+      const store = useShoppingStore()
+      const entries = [
+        createMockEntry(1, tomato, gramUnit, 500, true, false, 1),
+        createMockEntry(2, tomato, gramUnit, 300, false, false, 2),
+      ]
+      setupTestFood(store, entries)
+
+      store.aggregateFood(tomato.id!)
+      store.aggregateFood(tomato.id!)
+      mockTrack.mockClear()
+
+      store.undoAggregateFood(tomato.id!)
+
+      expect(mockTrack).toHaveBeenCalledTimes(1)
+      const event: AnalyticsEvent = mockTrack.mock.calls[0][0]
+      expect(event.name).toBe('aggregate.undo')
+      expect(event.properties.fromLevel).toBe(AggregationLevel.FULL)
+      expect(event.properties.toLevel).toBe(AggregationLevel.SEMI)
+    })
+
+    it('无法聚合时不应该上报事件', () => {
+      const store = useShoppingStore()
+      const entries = [createMockEntry(1, tomato, gramUnit, 500, false, false, 1)]
+      const food = setupTestFood(store, entries)
+      food.aggregationLevel = AggregationLevel.FULL
+
+      store.aggregateFood(tomato.id!)
+
+      expect(mockTrack).not.toHaveBeenCalled()
+    })
+
+    it('没有历史记录时撤销不应该上报事件', () => {
+      const store = useShoppingStore()
+      const entries = [createMockEntry(1, tomato, gramUnit, 500, false, false, 1)]
+      setupTestFood(store, entries)
+
+      store.undoAggregateFood(tomato.id!)
+
+      expect(mockTrack).not.toHaveBeenCalled()
     })
   })
 })
