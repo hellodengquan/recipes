@@ -109,6 +109,88 @@ def calculate_set_similarity(set1, set2):
     return intersection / union
 
 
+def _get_name_match_details(query_name, recipe, use_trigram=False):
+    normalized_query = normalize_name(query_name)
+    normalized_existing = normalize_name(recipe.name)
+    if not normalized_query or not normalized_existing:
+        return {
+            'matched': False,
+            'similarity': 0.0,
+            'query_value': query_name or '',
+            'existing_value': recipe.name or '',
+            'normalized_query': normalized_query,
+            'normalized_existing': normalized_existing,
+        }
+
+    similarity = calculate_similarity(normalized_query, normalized_existing)
+    is_exact = normalized_query == normalized_existing
+
+    return {
+        'matched': similarity >= NAME_SIMILARITY_THRESHOLD,
+        'similarity': round(similarity, 4),
+        'is_exact': is_exact,
+        'query_value': query_name or '',
+        'existing_value': recipe.name or '',
+        'normalized_query': normalized_query,
+        'normalized_existing': normalized_existing,
+    }
+
+
+def _get_url_match_details(query_url, recipe):
+    normalized_query = normalize_url(query_url)
+    normalized_existing = normalize_url(recipe.source_url or '')
+    if not normalized_query or not normalized_existing:
+        return {
+            'matched': False,
+            'similarity': 0.0,
+            'query_value': query_url or '',
+            'existing_value': recipe.source_url or '',
+            'normalized_query': normalized_query,
+            'normalized_existing': normalized_existing,
+        }
+
+    similarity = calculate_similarity(normalized_query, normalized_existing)
+    is_exact = normalized_query == normalized_existing
+
+    return {
+        'matched': similarity >= URL_SIMILARITY_THRESHOLD,
+        'similarity': round(similarity, 4),
+        'is_exact': is_exact,
+        'query_value': query_url or '',
+        'existing_value': recipe.source_url or '',
+        'normalized_query': normalized_query,
+        'normalized_existing': normalized_existing,
+    }
+
+
+def _get_ingredient_match_details(query_ingredient_names, recipe):
+    existing_names = get_recipe_ingredient_names(recipe)
+    if not query_ingredient_names or not existing_names:
+        return {
+            'matched': False,
+            'similarity': 0.0,
+            'query_count': len(query_ingredient_names) if query_ingredient_names else 0,
+            'existing_count': len(existing_names),
+            'matching_ingredients': [],
+            'query_ingredients': sorted(list(query_ingredient_names)) if query_ingredient_names else [],
+            'existing_ingredients': sorted(list(existing_names)),
+        }
+
+    similarity = calculate_set_similarity(query_ingredient_names, existing_names)
+    matching = sorted(list(query_ingredient_names & existing_names))
+
+    return {
+        'matched': similarity >= INGREDIENT_SIMILARITY_THRESHOLD,
+        'similarity': round(similarity, 4),
+        'query_count': len(query_ingredient_names),
+        'existing_count': len(existing_names),
+        'matching_ingredients': matching,
+        'matching_count': len(matching),
+        'query_ingredients': sorted(list(query_ingredient_names)),
+        'existing_ingredients': sorted(list(existing_names)),
+    }
+
+
 def _check_name_match(query_name, existing_recipes, use_trigram=True):
     normalized_query = normalize_name(query_name)
     if not normalized_query:
@@ -249,6 +331,103 @@ def find_duplicate_recipes(
             combined_pks = strong_pks | combined_pks
 
     return existing_recipes.filter(pk__in=combined_pks)
+
+
+def get_duplicate_recipes_with_details(
+    space,
+    name=None,
+    source_url=None,
+    ingredient_names=None,
+    recipe_json=None,
+    require_name_match=True,
+):
+    """
+    Find potentially duplicate recipes with detailed match evidence for each signal type.
+
+    Args:
+        space: Space object to search within
+        name: Recipe name to check (string)
+        source_url: Recipe source URL to check (string)
+        ingredient_names: Set/list of ingredient name strings (pre-normalized)
+        recipe_json: Optional recipe JSON dict containing name, source_url, and steps/ingredients
+        require_name_match: If True, name match is required in combination with other signals
+
+    Returns:
+        list of dicts with recipe info and detailed match evidence:
+        [
+            {
+                'id': recipe_id,
+                'name': recipe_name,
+                'source_url': recipe_source_url,
+                'overall_similarity': float,
+                'name_match': { 'matched': bool, 'similarity': float, ... },
+                'url_match': { 'matched': bool, 'similarity': float, ... },
+                'ingredient_match': { 'matched': bool, 'similarity': float, ... },
+                'matched_signals': ['name', 'url', 'ingredient'],
+            },
+            ...
+        ]
+    """
+    if recipe_json:
+        if not name:
+            name = recipe_json.get('name')
+        if not source_url:
+            source_url = recipe_json.get('source_url')
+        if not ingredient_names:
+            ingredient_names = get_json_ingredient_names(recipe_json)
+
+    if isinstance(ingredient_names, list):
+        ingredient_names = set(normalize_name(n) for n in ingredient_names if n)
+
+    duplicates = find_duplicate_recipes(
+        space=space,
+        name=name,
+        source_url=source_url,
+        ingredient_names=ingredient_names,
+        require_name_match=require_name_match,
+    )
+
+    results = []
+    for recipe in duplicates:
+        name_detail = _get_name_match_details(name, recipe) if name else {
+            'matched': False, 'similarity': 0.0, 'query_value': '', 'existing_value': recipe.name or ''
+        }
+        url_detail = _get_url_match_details(source_url, recipe) if source_url else {
+            'matched': False, 'similarity': 0.0, 'query_value': '', 'existing_value': recipe.source_url or ''
+        }
+        ingredient_detail = _get_ingredient_match_details(ingredient_names, recipe) if ingredient_names else {
+            'matched': False, 'similarity': 0.0, 'query_count': 0, 'existing_count': 0, 'matching_ingredients': []
+        }
+
+        matched_signals = []
+        signal_weights = []
+        if name_detail.get('matched'):
+            matched_signals.append('name')
+            signal_weights.append(name_detail.get('similarity', 0))
+        if url_detail.get('matched'):
+            matched_signals.append('url')
+            signal_weights.append(url_detail.get('similarity', 0))
+        if ingredient_detail.get('matched'):
+            matched_signals.append('ingredient')
+            signal_weights.append(ingredient_detail.get('similarity', 0))
+
+        overall_similarity = sum(signal_weights) / len(signal_weights) if signal_weights else 0.0
+
+        results.append({
+            'id': recipe.pk,
+            'name': recipe.name,
+            'source_url': recipe.source_url or '',
+            'overall_similarity': round(overall_similarity, 4),
+            'name_match': name_detail,
+            'url_match': url_detail,
+            'ingredient_match': ingredient_detail,
+            'matched_signals': matched_signals,
+            'match_count': len(matched_signals),
+        })
+
+    results.sort(key=lambda x: (-x['match_count'], -x['overall_similarity']))
+
+    return results
 
 
 def is_duplicate_recipe(

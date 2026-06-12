@@ -2142,9 +2142,41 @@ class SourceImportRecipeSerializer(serializers.Serializer):
     properties = serializers.ListField(child=SourceImportPropertySerializer(), default=[])
 
 
+class SourceImportDuplicateNameMatchSerializer(serializers.Serializer):
+    matched = serializers.BooleanField(default=False)
+    similarity = serializers.FloatField(default=0.0)
+    is_exact = serializers.BooleanField(default=False, required=False)
+    query_value = serializers.CharField(default='', required=False)
+    existing_value = serializers.CharField(default='', required=False)
+
+
+class SourceImportDuplicateUrlMatchSerializer(serializers.Serializer):
+    matched = serializers.BooleanField(default=False)
+    similarity = serializers.FloatField(default=0.0)
+    is_exact = serializers.BooleanField(default=False, required=False)
+    query_value = serializers.CharField(default='', required=False)
+    existing_value = serializers.CharField(default='', required=False)
+
+
+class SourceImportDuplicateIngredientMatchSerializer(serializers.Serializer):
+    matched = serializers.BooleanField(default=False)
+    similarity = serializers.FloatField(default=0.0)
+    query_count = serializers.IntegerField(default=0, required=False)
+    existing_count = serializers.IntegerField(default=0, required=False)
+    matching_count = serializers.IntegerField(default=0, required=False)
+    matching_ingredients = serializers.ListField(child=serializers.CharField(), default=[], required=False)
+
+
 class SourceImportDuplicateSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     name = serializers.CharField()
+    source_url = serializers.CharField(default='', required=False)
+    overall_similarity = serializers.FloatField(default=0.0, required=False)
+    match_count = serializers.IntegerField(default=0, required=False)
+    matched_signals = serializers.ListField(child=serializers.CharField(), default=[], required=False)
+    name_match = SourceImportDuplicateNameMatchSerializer(required=False, default={})
+    url_match = SourceImportDuplicateUrlMatchSerializer(required=False, default={})
+    ingredient_match = SourceImportDuplicateIngredientMatchSerializer(required=False, default={})
 
 
 class RecipeFromSourceResponseSerializer(serializers.Serializer):

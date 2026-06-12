@@ -70,7 +70,7 @@ from cookbook.connectors.connector_manager import ConnectorManager, ActionType
 from cookbook.forms import ImportForm, ImportExportBase
 from cookbook.helper import recipe_url_import as helper
 from cookbook.helper.HelperFunctions import str2bool, safe_request
-from cookbook.helper.recipe_duplicate_detector import find_duplicate_recipes
+from cookbook.helper.recipe_duplicate_detector import find_duplicate_recipes, get_duplicate_recipes_with_details
 from cookbook.helper.ai_helper import can_perform_ai_request, AiCallbackHandler
 from cookbook.helper.batch_edit_helper import add_to_relation, remove_from_relation, remove_all_from_relation, set_relation
 from cookbook.helper.image_processing import handle_image
@@ -2605,14 +2605,14 @@ class RecipeUrlImportView(APIView):
                     recipe_json = get_from_youtube_scraper(url, request)
                     response['recipe'] = recipe_json
                     if url and url.strip() != '':
-                        duplicates = find_duplicate_recipes(
+                        duplicates = get_duplicate_recipes_with_details(
                             space=request.space,
                             name=recipe_json.get('name'),
                             source_url=url.strip(),
                             recipe_json=recipe_json,
                             require_name_match=False,
                         )
-                        response['duplicates'] = duplicates.values('id', 'name').all()
+                        response['duplicates'] = duplicates
                     return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_200_OK)
 
                 tandoor_url = None
@@ -2682,14 +2682,14 @@ class RecipeUrlImportView(APIView):
                 recipe_json = helper.get_from_scraper(scrape, request)
                 response['recipe'] = recipe_json
                 response['images'] = list(dict.fromkeys(get_images_from_soup(scrape.soup, url)))
-                duplicates = find_duplicate_recipes(
+                duplicates = get_duplicate_recipes_with_details(
                     space=request.space,
                     name=recipe_json.get('name'),
                     source_url=url.strip() if url else recipe_json.get('source_url'),
                     recipe_json=recipe_json,
                     require_name_match=False,
                 )
-                response['duplicates'] = duplicates.values('id', 'name').all()
+                response['duplicates'] = duplicates
                 return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_200_OK)
 
             else:
@@ -2842,7 +2842,14 @@ class AiImportView(APIView):
                     response = dict()
                     response['recipe'] = recipe
                     response['images'] = []
-                    response['duplicates'] = Recipe.objects.filter(space=request.space, name=recipe['name']).values('id', 'name').all()
+                    duplicates = get_duplicate_recipes_with_details(
+                        space=request.space,
+                        name=recipe.get('name'),
+                        source_url=recipe.get('source_url'),
+                        recipe_json=recipe,
+                        require_name_match=False,
+                    )
+                    response['duplicates'] = duplicates
                     return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_200_OK)
             except JSONDecodeError:
                 traceback.print_exc()
