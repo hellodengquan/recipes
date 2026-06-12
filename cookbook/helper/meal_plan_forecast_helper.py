@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Optional
 
-from django.db.models import Sum, Q
+from django.db import transaction
+from django.db.models import Sum, Q, F
 from django.utils import timezone
 
 from cookbook.helper.permission_helper import get_household_user_ids
@@ -18,6 +19,20 @@ from cookbook.models import (
     Step,
     Unit,
 )
+
+
+class ForecastConflictError(Exception):
+    """
+    Raised when optimistic locking detects a concurrent modification
+    to an InventoryEntry during a reservation (pre-allocation) operation.
+    """
+    def __init__(self, message=None, food_id=None, entry_id=None):
+        self.food_id = food_id
+        self.entry_id = entry_id
+        super().__init__(message or 'Inventory was modified by another session. Please retry.')
+
+
+MAX_OPTIMISTIC_RETRIES = 2
 
 
 @dataclass
@@ -56,46 +71,6 @@ def _get_household_for_user(user_space):
         return user_space.household
     except AttributeError:
         return None
-
-
-def _get_inventory_for_household(space, household, uch: UnitConversionHelper):
-    """
-    Get all inventory entries for the given household, aggregated by food and normalized to base units.
-    Returns: dict[food_id] -> dict[base_unit_id or None] -> total amount
-    """
-    inventory = defaultdict(lambda: defaultdict(Decimal))
-    inventory_details = defaultdict(lambda: defaultdict(list))  # for unit reference
-
-    qs = InventoryEntry.objects.filter(
-        space=space,
-        amount__gt=0,
-    )
-    if household is not None:
-        qs = qs.filter(inventory_location__household=household)
-
-    qs = qs.select_related('food', 'unit')
-
-    for entry in qs:
-        food_id = entry.food_id
-        amount = entry.amount
-        unit = entry.unit
-        base_unit_key = None
-        if unit:
-            base_unit_key = getattr(unit, 'base_unit', None) or unit.id or unit.name
-            # Try to normalize amount to base unit for easier comparison
-            try:
-                if unit.base_unit and unit.base_unit != unit.name:
-                    conversions = uch.get_conversions(entry)
-                    for conv in conversions:
-                        if conv.unit and (conv.unit.base_unit == unit.base_unit or conv.unit.id == unit.id):
-                            pass
-                    # Simple approach: just use the entry as-is, will aggregate by (food, unit) first
-            except Exception:
-                pass
-        inventory[food_id][base_unit_key] += amount
-        inventory_details[food_id][base_unit_key].append(entry)
-
-    return inventory, inventory_details
 
 
 def _get_meal_plan_ingredients(meal_plan: MealPlan, uch: UnitConversionHelper):
@@ -144,38 +119,150 @@ def _get_meal_plan_ingredients(meal_plan: MealPlan, uch: UnitConversionHelper):
     return ingredients
 
 
+def _reserve_inventory_with_optimistic_lock(
+    space,
+    household,
+    reservations,
+):
+    """
+    Perform the actual inventory reservation (deduction) using
+    optimistic locking (version field) + select_for_update within a transaction.
+
+    Args:
+        space: the current space
+        household: the household to filter inventory by (can be None)
+        reservations: list of dicts with keys:
+            - food_id: int
+            - base_unit_key: the unit key for matching
+            - amount: Decimal amount to reserve (deduct from inventory)
+
+    Returns:
+        dict mapping (food_id, base_unit_key) -> Decimal of actually reserved amount
+
+    Raises:
+        ForecastConflictError: if optimistic lock fails after retries
+    """
+    if not reservations:
+        return {}
+
+    food_unit_pairs = set()
+    for r in reservations:
+        food_unit_pairs.add((r['food_id'], r['base_unit_key']))
+
+    reserved_amounts = defaultdict(Decimal)
+
+    for attempt in range(MAX_OPTIMISTIC_RETRIES):
+        try:
+            with transaction.atomic():
+                qs = InventoryEntry.objects.filter(
+                    space=space,
+                    amount__gt=0,
+                )
+                if household is not None:
+                    qs = qs.filter(inventory_location__household=household)
+
+                food_ids = {f_id for f_id, _ in food_unit_pairs}
+                qs = qs.filter(food_id__in=food_ids)
+
+                entries = qs.select_for_update().select_related('food', 'unit')
+
+                entries_by_key = defaultdict(list)
+                for entry in entries:
+                    unit = entry.unit
+                    base_unit_key = None
+                    if unit:
+                        base_unit_key = getattr(unit, 'base_unit', None) or unit.id or unit.name
+                    key = (entry.food_id, base_unit_key)
+                    entries_by_key[key].append(entry)
+
+                for r in reservations:
+                    key = (r['food_id'], r['base_unit_key'])
+                    to_reserve = r['amount']
+                    if to_reserve <= 0:
+                        continue
+
+                    relevant_entries = entries_by_key.get(key, [])
+                    remaining = to_reserve
+
+                    for entry in relevant_entries:
+                        if remaining <= 0:
+                            break
+
+                        deduct = min(entry.amount, remaining)
+                        old_version = entry.version
+
+                        updated = InventoryEntry.objects.filter(
+                            pk=entry.pk,
+                            version=old_version,
+                        ).update(
+                            amount=F('amount') - deduct,
+                            version=F('version') + 1,
+                        )
+
+                        if updated == 0:
+                            raise ForecastConflictError(
+                                f'Optimistic lock conflict on InventoryEntry {entry.pk} '
+                                f'(food_id={entry.food_id}, expected_version={old_version})',
+                                food_id=entry.food_id,
+                                entry_id=entry.pk,
+                            )
+
+                        entry.amount -= deduct
+                        entry.version = old_version + 1
+                        remaining -= deduct
+                        reserved_amounts[key] += deduct
+
+            return dict(reserved_amounts)
+
+        except ForecastConflictError:
+            if attempt >= MAX_OPTIMISTIC_RETRIES - 1:
+                raise
+            continue
+
+    return dict(reserved_amounts)
+
+
 def calculate_meal_plan_forecast(
     user,
     user_space,
     space,
     from_date=None,
     to_date=None,
+    commit_reservation=False,
 ):
     """
     Calculate ingredient forecast for meal plans within the given date range.
 
+    When commit_reservation=True, the function also performs actual inventory
+    deduction using optimistic locking + select_for_update to prevent
+    concurrent double-deduction.
+
     Algorithm:
     1. Get all meal plans in the date range, ordered by from_date
     2. For each meal plan, collect its required ingredients
-    3. Aggregate inventory by food
+    3. Read current inventory using select_for_update (when committing)
     4. Process meal plans in order:
        - Use available inventory to cover requirements first (becomes "reserved")
        - Any requirements beyond available inventory become "to_buy"
        - Remaining inventory not used by any meal plan is "available" (已备)
+    5. If commit_reservation=True, write deductions back to InventoryEntry
+       using optimistic lock (version field)
 
     Returns:
         list of ForecastFoodEntry objects
+
+    Raises:
+        ForecastConflictError: when commit_reservation=True and a concurrent
+            modification is detected that cannot be resolved by retry
     """
     household = _get_household_for_user(user_space)
     uch = UnitConversionHelper(space)
 
-    # Get date range defaults
     if from_date is None:
         from_date = timezone.now().date()
     if to_date is None:
         to_date = from_date + timezone.timedelta(days=30)
 
-    # Step 1: Get all relevant meal plans ordered by date
     user_ids = get_household_user_ids(user_space)
     meal_plans = MealPlan.objects.filter(
         space=space,
@@ -187,28 +274,62 @@ def calculate_meal_plan_forecast(
         'recipe', 'meal_type', 'created_by'
     ).order_by('from_date').distinct()
 
-    # Step 2: Get inventory
-    inventory, inventory_details = _get_inventory_for_household(space, household, uch)
+    inventory = defaultdict(lambda: defaultdict(Decimal))
+    inventory_details = defaultdict(lambda: defaultdict(list))
+    food_to_unit = {}
 
-    # Work with copies of inventory that we can decrement
+    if commit_reservation:
+        with transaction.atomic():
+            qs = InventoryEntry.objects.filter(
+                space=space,
+                amount__gt=0,
+            )
+            if household is not None:
+                qs = qs.filter(inventory_location__household=household)
+
+            qs = qs.select_for_update().select_related('food', 'unit')
+
+            for entry in qs:
+                food_id = entry.food_id
+                amount = entry.amount
+                unit = entry.unit
+                base_unit_key = None
+                if unit:
+                    base_unit_key = getattr(unit, 'base_unit', None) or unit.id or unit.name
+                inventory[food_id][base_unit_key] += amount
+                inventory_details[food_id][base_unit_key].append(entry)
+                if unit:
+                    food_to_unit[(food_id, base_unit_key)] = unit
+    else:
+        qs = InventoryEntry.objects.filter(
+            space=space,
+            amount__gt=0,
+        )
+        if household is not None:
+            qs = qs.filter(inventory_location__household=household)
+
+        qs = qs.select_related('food', 'unit')
+
+        for entry in qs:
+            food_id = entry.food_id
+            amount = entry.amount
+            unit = entry.unit
+            base_unit_key = None
+            if unit:
+                base_unit_key = getattr(unit, 'base_unit', None) or unit.id or unit.name
+            inventory[food_id][base_unit_key] += amount
+            inventory_details[food_id][base_unit_key].append(entry)
+            if unit:
+                food_to_unit[(food_id, base_unit_key)] = unit
+
     remaining_inventory = defaultdict(lambda: defaultdict(Decimal))
     for food_id, units in inventory.items():
         for unit_key, amount in units.items():
             remaining_inventory[food_id][unit_key] = amount
 
-    # Step 3: Collect all food units from inventory for reference
-    food_to_unit = {}
-    for food_id, units in inventory_details.items():
-        for unit_key, entries in units.items():
-            if entries:
-                first_entry = entries[0]
-                if first_entry.unit:
-                    food_to_unit[(food_id, unit_key)] = first_entry.unit
+    forecast_by_food = {}
+    reservation_list = []
 
-    # Aggregate by food across all meal plans, keeping per-usage details
-    forecast_by_food = {}  # (food_id, unit_key) -> ForecastFoodEntry
-
-    # Step 4: Process each meal plan in chronological order
     for mp in meal_plans:
         if not mp.recipe:
             continue
@@ -227,11 +348,9 @@ def calculate_meal_plan_forecast(
             unit_name = ing['unit_name']
             food_name = ing['food_name']
 
-            # Create key for aggregation - use None unit_key too
             key = (food_id, unit_key)
 
             if key not in forecast_by_food:
-                # Find the best unit name (prioritize inventory unit)
                 ref_unit_name = unit_name
                 ref_base_unit_name = None
                 if unit_key and (food_id, unit_key) in food_to_unit:
@@ -248,27 +367,22 @@ def calculate_meal_plan_forecast(
 
             entry = forecast_by_food[key]
 
-            # Update inventory totals based on actual inventory
             inv_amount = inventory.get(food_id, {}).get(unit_key, Decimal('0'))
             if entry.total_inventory < inv_amount:
                 entry.total_inventory = inv_amount
 
             entry.total_required += amount
 
-            # Figure out coverage: use remaining inventory first
             remaining = remaining_inventory.get(food_id, {}).get(unit_key, Decimal('0'))
             covered_by_stock = min(remaining, amount)
             covered_by_purchase = max(Decimal('0'), amount - covered_by_stock)
 
-            # Deduct from remaining inventory
             if food_id in remaining_inventory and unit_key in remaining_inventory[food_id]:
                 remaining_inventory[food_id][unit_key] -= covered_by_stock
 
-            # Update status totals
             entry.status_reserved += covered_by_stock
             entry.status_to_buy += covered_by_purchase
 
-            # Record this usage
             entry.usages.append(ForecastFoodUsage(
                 meal_plan_id=mp.id,
                 meal_plan_title=meal_plan_title,
@@ -282,20 +396,22 @@ def calculate_meal_plan_forecast(
                 covered_by_purchase=covered_by_purchase,
             ))
 
-    # Step 5: After processing all meal plans, calculate available (已备)
+            if covered_by_stock > 0 and commit_reservation:
+                reservation_list.append({
+                    'food_id': food_id,
+                    'base_unit_key': unit_key,
+                    'amount': covered_by_stock,
+                })
+
     for key, entry in forecast_by_food.items():
         food_id, unit_key = key
         remaining = remaining_inventory.get(food_id, {}).get(unit_key, Decimal('0'))
         entry.status_available = max(Decimal('0'), remaining)
-        # Sanity check: total_inventory should = available + reserved
-        # (though rounding might make this off by a tiny bit)
 
-    # Step 6: Also include foods that are in inventory but not required by any meal plan
     for food_id, units in inventory.items():
         for unit_key, inv_amount in units.items():
             key = (food_id, unit_key)
             if key not in forecast_by_food:
-                # Get food name
                 try:
                     food = Food.objects.filter(id=food_id, space=space).first()
                     food_name = food.name if food else str(food_id)
@@ -322,13 +438,17 @@ def calculate_meal_plan_forecast(
                     usages=[],
                 )
 
+    if commit_reservation and reservation_list:
+        _reserve_inventory_with_optimistic_lock(
+            space=space,
+            household=household,
+            reservations=reservation_list,
+        )
+
     return list(forecast_by_food.values())
 
 
 def serialize_forecast_entry(entry: ForecastFoodEntry):
-    """
-    Convert a ForecastFoodEntry to a JSON-serializable dict.
-    """
     return {
         'food_id': entry.food_id,
         'food_name': entry.food_name,
@@ -355,4 +475,3 @@ def serialize_forecast_entry(entry: ForecastFoodEntry):
             for u in entry.usages
         ],
     }
-

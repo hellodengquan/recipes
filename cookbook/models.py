@@ -1384,6 +1384,7 @@ class InventoryEntry(models.Model, PermissionModelMixin):
     expires = models.DateField(null=True, blank=True)
 
     note = models.CharField(max_length=256, null=True, blank=True)
+    version = models.PositiveIntegerField(default=0)
 
     created_by = models.ForeignKey(User, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)

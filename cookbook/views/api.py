@@ -1541,8 +1541,9 @@ class MealPlanViewSet(LoggingMixin, viewsets.ModelViewSet):
         parameters=[
             OpenApiParameter(name='from_date', description=_('Forecast start date (inclusive). Defaults to today.'), type=str, required=False),
             OpenApiParameter(name='to_date', description=_('Forecast end date (inclusive). Defaults to 30 days from today.'), type=str, required=False),
+            OpenApiParameter(name='commit', description=_('If true, reserve (deduct) inventory for meal plans. Requires optimistic lock.'), type=bool, required=False),
         ],
-        responses={200: OpenApiTypes.OBJECT}
+        responses={200: OpenApiTypes.OBJECT, 409: OpenApiTypes.OBJECT}
     )
     @decorators.action(detail=False, methods=['get'])
     def ingredient_forecast(self, request):
@@ -1552,9 +1553,15 @@ class MealPlanViewSet(LoggingMixin, viewsets.ModelViewSet):
         - status_available: In stock, not required by any meal plan (已备)
         - status_reserved: In stock, but will be used by upcoming meal plans (即将占用)
         - status_to_buy: Not enough stock, needs to be purchased (需购买)
+
+        When commit=true, also performs inventory deduction with optimistic locking.
+        Returns 409 Conflict if a concurrent modification is detected.
         """
+        from cookbook.helper.meal_plan_forecast_helper import ForecastConflictError
+
         from_date_str = request.query_params.get('from_date')
         to_date_str = request.query_params.get('to_date')
+        commit_reservation = request.query_params.get('commit', '').lower() in ('true', '1', 'yes')
 
         from_date = None
         to_date = None
@@ -1577,13 +1584,25 @@ class MealPlanViewSet(LoggingMixin, viewsets.ModelViewSet):
                 except ValueError:
                     pass
 
-        results = calculate_meal_plan_forecast(
-            user=request.user,
-            user_space=request.user_space,
-            space=request.space,
-            from_date=from_date,
-            to_date=to_date,
-        )
+        try:
+            results = calculate_meal_plan_forecast(
+                user=request.user,
+                user_space=request.user_space,
+                space=request.space,
+                from_date=from_date,
+                to_date=to_date,
+                commit_reservation=commit_reservation,
+            )
+        except ForecastConflictError as e:
+            return Response(
+                {
+                    'detail': str(e),
+                    'code': 'forecast_conflict',
+                    'food_id': e.food_id,
+                    'entry_id': e.entry_id,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
         serialized = [serialize_forecast_entry(e) for e in results]
 
