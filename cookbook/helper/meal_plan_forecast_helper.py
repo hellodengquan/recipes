@@ -119,6 +119,45 @@ def _get_meal_plan_ingredients(meal_plan: MealPlan, uch: UnitConversionHelper):
     return ingredients
 
 
+def _get_food_reserve_retry_limits(space, food_ids):
+    """
+    Fetch reserve_retry_limit for the given food_ids.
+    Returns a dict: {food_id: retry_limit_int}
+    Any food not found or with NULL limit defaults to 1.
+    """
+    from cookbook.models import Food
+
+    limits = {}
+    qs = Food.objects.filter(space=space, id__in=list(food_ids))
+    for f in qs.only('id', 'reserve_retry_limit'):
+        limits[f.id] = int(getattr(f, 'reserve_retry_limit', 1) or 1)
+    for fid in food_ids:
+        limits.setdefault(fid, 1)
+    return limits
+
+
+def _compute_max_attempts(space, food_ids, last_conflict_food_id=None):
+    """
+    Based on Food.reserve_retry_limit, determine the retry policy.
+
+    Strategy:
+    - If a specific food caused the last conflict and its reserve_retry_limit=0
+      → return 1 (immediate failure, no retries)
+    - Otherwise the global attempt count is 1 + max(reserve_retry_limit across foods),
+      i.e. first try + N retries.
+    """
+    limits = _get_food_reserve_retry_limits(space, food_ids)
+    if not limits:
+        return MAX_OPTIMISTIC_RETRIES
+
+    if last_conflict_food_id is not None and last_conflict_food_id in limits:
+        if limits[last_conflict_food_id] == 0:
+            return 1
+
+    max_limit = max(limits.values())
+    return 1 + max(0, max_limit)
+
+
 def _reserve_inventory_with_optimistic_lock(
     space,
     household,
@@ -127,6 +166,11 @@ def _reserve_inventory_with_optimistic_lock(
     """
     Perform the actual inventory reservation (deduction) using
     optimistic locking (version field) + select_for_update within a transaction.
+
+    Each reservation run's overall retry limit is determined by the maximum
+    Food.reserve_retry_limit among the foods being reserved that round.
+    If any single food has limit=0 and causes a conflict, the entire batch
+    fails immediately.
 
     Args:
         space: the current space
@@ -140,84 +184,90 @@ def _reserve_inventory_with_optimistic_lock(
         dict mapping (food_id, base_unit_key) -> Decimal of actually reserved amount
 
     Raises:
-        ForecastConflictError: if optimistic lock fails after retries
+        ForecastConflictError: if optimistic lock fails after retries exhausted
     """
     if not reservations:
         return {}
 
     food_unit_pairs = set()
+    food_ids = set()
     for r in reservations:
         food_unit_pairs.add((r['food_id'], r['base_unit_key']))
+        food_ids.add(r['food_id'])
 
     reserved_amounts = defaultdict(Decimal)
+    conflict_food_id = None
 
-    for attempt in range(MAX_OPTIMISTIC_RETRIES):
-        try:
-            with transaction.atomic():
-                qs = InventoryEntry.objects.filter(
-                    space=space,
-                    amount__gt=0,
-                )
-                if household is not None:
-                    qs = qs.filter(inventory_location__household=household)
+    while True:
+        max_attempts = _compute_max_attempts(space, food_ids, conflict_food_id)
 
-                food_ids = {f_id for f_id, _ in food_unit_pairs}
-                qs = qs.filter(food_id__in=food_ids)
+        for attempt in range(max_attempts):
+            try:
+                with transaction.atomic():
+                    qs = InventoryEntry.objects.filter(
+                        space=space,
+                        amount__gt=0,
+                    )
+                    if household is not None:
+                        qs = qs.filter(inventory_location__household=household)
 
-                entries = qs.select_for_update().select_related('food', 'unit')
+                    qs = qs.filter(food_id__in=food_ids)
 
-                entries_by_key = defaultdict(list)
-                for entry in entries:
-                    unit = entry.unit
-                    base_unit_key = None
-                    if unit:
-                        base_unit_key = getattr(unit, 'base_unit', None) or unit.id or unit.name
-                    key = (entry.food_id, base_unit_key)
-                    entries_by_key[key].append(entry)
+                    entries = qs.select_for_update().select_related('food', 'unit')
 
-                for r in reservations:
-                    key = (r['food_id'], r['base_unit_key'])
-                    to_reserve = r['amount']
-                    if to_reserve <= 0:
-                        continue
+                    entries_by_key = defaultdict(list)
+                    for entry in entries:
+                        unit = entry.unit
+                        base_unit_key = None
+                        if unit:
+                            base_unit_key = getattr(unit, 'base_unit', None) or unit.id or unit.name
+                        key = (entry.food_id, base_unit_key)
+                        entries_by_key[key].append(entry)
 
-                    relevant_entries = entries_by_key.get(key, [])
-                    remaining = to_reserve
+                    for r in reservations:
+                        key = (r['food_id'], r['base_unit_key'])
+                        to_reserve = r['amount']
+                        if to_reserve <= 0:
+                            continue
 
-                    for entry in relevant_entries:
-                        if remaining <= 0:
-                            break
+                        relevant_entries = entries_by_key.get(key, [])
+                        remaining = to_reserve
 
-                        deduct = min(entry.amount, remaining)
-                        old_version = entry.version
+                        for entry in relevant_entries:
+                            if remaining <= 0:
+                                break
 
-                        updated = InventoryEntry.objects.filter(
-                            pk=entry.pk,
-                            version=old_version,
-                        ).update(
-                            amount=F('amount') - deduct,
-                            version=F('version') + 1,
-                        )
+                            deduct = min(entry.amount, remaining)
+                            old_version = entry.version
 
-                        if updated == 0:
-                            raise ForecastConflictError(
-                                f'Optimistic lock conflict on InventoryEntry {entry.pk} '
-                                f'(food_id={entry.food_id}, expected_version={old_version})',
-                                food_id=entry.food_id,
-                                entry_id=entry.pk,
+                            updated = InventoryEntry.objects.filter(
+                                pk=entry.pk,
+                                version=old_version,
+                            ).update(
+                                amount=F('amount') - deduct,
+                                version=F('version') + 1,
                             )
 
-                        entry.amount -= deduct
-                        entry.version = old_version + 1
-                        remaining -= deduct
-                        reserved_amounts[key] += deduct
+                            if updated == 0:
+                                raise ForecastConflictError(
+                                    f'Optimistic lock conflict on InventoryEntry {entry.pk} '
+                                    f'(food_id={entry.food_id}, expected_version={old_version})',
+                                    food_id=entry.food_id,
+                                    entry_id=entry.pk,
+                                )
 
-            return dict(reserved_amounts)
+                            entry.amount -= deduct
+                            entry.version = old_version + 1
+                            remaining -= deduct
+                            reserved_amounts[key] += deduct
 
-        except ForecastConflictError:
-            if attempt >= MAX_OPTIMISTIC_RETRIES - 1:
-                raise
-            continue
+                return dict(reserved_amounts)
+
+            except ForecastConflictError as e:
+                conflict_food_id = e.food_id
+                if attempt >= max_attempts - 1:
+                    raise
+                continue
 
     return dict(reserved_amounts)
 

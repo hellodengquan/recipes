@@ -804,6 +804,7 @@ class Food(ExportModelOperationsMixin('food'), TreeModel, PermissionModelMixin):
     fdc_id = models.IntegerField(null=True, default=None, blank=True)
 
     open_data_slug = models.CharField(max_length=128, null=True, blank=True, default=None)
+    reserve_retry_limit = models.PositiveSmallIntegerField(default=1)
     space = models.ForeignKey(Space, on_delete=models.CASCADE)
     objects = ScopedManager(space='space', _manager_class=TreeManager)
 

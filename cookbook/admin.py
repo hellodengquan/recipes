@@ -266,7 +266,27 @@ admin.site.register(Unit, UnitAdmin)
 class FoodAdmin(TreeAdmin):
     form = movenodeform_factory(Keyword)
     ordering = ('space', 'path',)
+    list_display = ('name', 'space', 'reserve_retry_limit', 'ignore_shopping')
+    list_editable = ('reserve_retry_limit',)
+    list_filter = ('ignore_shopping', 'reserve_retry_limit')
     search_fields = ('name',)
+    fieldsets = (
+        (None, {
+            'fields': ('name', 'plural_name', 'space', 'description')
+        }),
+        ('Inventory', {
+            'fields': ('reserve_retry_limit', 'ignore_shopping'),
+            'classes': ('collapse',),
+        }),
+        ('Metadata', {
+            'fields': ('url', 'fdc_id', 'open_data_slug', 'preferred_unit', 'preferred_shopping_unit', 'supermarket_category', 'recipe'),
+            'classes': ('collapse',),
+        }),
+        ('Tree', {
+            'fields': ('substitute', 'substitute_siblings', 'substitute_children'),
+            'classes': ('collapse',),
+        }),
+    )
     actions = [sort_tree, enable_tree_sorting, disable_tree_sorting]
 
 
