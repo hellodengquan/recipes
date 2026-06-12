@@ -6,6 +6,7 @@ from django.contrib.postgres.search import TrigramSimilarity
 from django.db.models import Q
 
 from cookbook.models import Recipe
+from cookbook.helper.ingredient_normalizer import normalize_ingredient_name
 
 
 NAME_SIMILARITY_THRESHOLD = 0.85
@@ -42,7 +43,7 @@ def normalize_url(url):
         return url.strip()
 
 
-def extract_ingredient_names(ingredients_data):
+def extract_ingredient_names(ingredients_data, use_normalization=True):
     names = set()
     if not ingredients_data:
         return names
@@ -64,18 +65,28 @@ def extract_ingredient_names(ingredients_data):
             else:
                 name = str(ing.food)
         if name:
+            if use_normalization:
+                canonical = normalize_ingredient_name(name)
+                if canonical['is_mapped']:
+                    names.add(canonical['canonical_name'].lower())
+                    continue
             normalized = normalize_name(name)
             if normalized:
                 names.add(normalized)
     return names
 
 
-def get_recipe_ingredient_names(recipe):
+def get_recipe_ingredient_names(recipe, use_normalization=True):
     names = set()
     try:
         for step in recipe.steps.all():
             for ing in step.ingredients.all():
                 if hasattr(ing, 'food') and ing.food:
+                    if use_normalization:
+                        canonical = normalize_ingredient_name(ing.food.name)
+                        if canonical['is_mapped']:
+                            names.add(canonical['canonical_name'].lower())
+                            continue
                     normalized = normalize_name(ing.food.name)
                     if normalized:
                         names.add(normalized)
