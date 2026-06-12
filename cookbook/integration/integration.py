@@ -16,6 +16,7 @@ from django_scopes import scope
 from lxml import etree
 
 from cookbook.helper.image_processing import handle_image
+from cookbook.helper.recipe_duplicate_detector import find_duplicate_recipes
 from cookbook.models import Keyword, Recipe
 from recipes.settings import DEBUG, EXPORT_FILE_CACHE_DURATION, MAX_ZIP_FILE_COUNT, MAX_ZIP_FILE_SIZE, MAX_ZIP_NESTING_DEPTH, MAX_ZIP_TOTAL_SIZE
 
@@ -286,7 +287,15 @@ class Integration:
         :param recipe: Recipe object
         :param import_duplicates: if duplicates should be imported
         """
-        if Recipe.objects.filter(space=self.request.space, name=recipe.name).count() > 1 and not import_duplicates:
+        if import_duplicates:
+            return
+        duplicates = find_duplicate_recipes(
+            space=self.request.space,
+            name=recipe.name,
+            source_url=getattr(recipe, 'source_url', None),
+        )
+        duplicates = duplicates.exclude(pk=recipe.pk)
+        if duplicates.exists():
             self.ignored_recipes.append(recipe.name)
             recipe.delete()
 

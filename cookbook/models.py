@@ -1183,6 +1183,15 @@ class RecipeImport(models.Model, PermissionModelMixin):
         return self.name
 
     def convert_to_recipe(self, user):
+        from cookbook.helper.recipe_duplicate_detector import find_duplicate_recipes
+        duplicates = find_duplicate_recipes(
+            space=self.space,
+            name=self.name,
+        )
+        if duplicates.exists():
+            existing = duplicates.first()
+            self.delete()
+            return existing
         recipe = Recipe(
             name=self.name,
             file_path=self.file_path,

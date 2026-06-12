@@ -70,6 +70,7 @@ from cookbook.connectors.connector_manager import ConnectorManager, ActionType
 from cookbook.forms import ImportForm, ImportExportBase
 from cookbook.helper import recipe_url_import as helper
 from cookbook.helper.HelperFunctions import str2bool, safe_request
+from cookbook.helper.recipe_duplicate_detector import find_duplicate_recipes
 from cookbook.helper.ai_helper import can_perform_ai_request, AiCallbackHandler
 from cookbook.helper.batch_edit_helper import add_to_relation, remove_from_relation, remove_all_from_relation, set_relation
 from cookbook.helper.image_processing import handle_image
@@ -2601,9 +2602,17 @@ class RecipeUrlImportView(APIView):
 
             elif url and not data:
                 if re.match('^(https?://)?(www\\.youtube\\.com|youtu\\.be)/.+$', url):
-                    response['recipe'] = get_from_youtube_scraper(url, request)
+                    recipe_json = get_from_youtube_scraper(url, request)
+                    response['recipe'] = recipe_json
                     if url and url.strip() != '':
-                        response['duplicates'] = Recipe.objects.filter(space=request.space, source_url=url.strip()).values('id', 'name').all()
+                        duplicates = find_duplicate_recipes(
+                            space=request.space,
+                            name=recipe_json.get('name'),
+                            source_url=url.strip(),
+                            recipe_json=recipe_json,
+                            require_name_match=False,
+                        )
+                        response['duplicates'] = duplicates.values('id', 'name').all()
                     return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_200_OK)
 
                 tandoor_url = None
@@ -2670,10 +2679,17 @@ class RecipeUrlImportView(APIView):
                     scrape = scrape_html(html=data, org_url=found_url, supported_only=False)
 
             if scrape:
-                response['recipe'] = helper.get_from_scraper(scrape, request)
+                recipe_json = helper.get_from_scraper(scrape, request)
+                response['recipe'] = recipe_json
                 response['images'] = list(dict.fromkeys(get_images_from_soup(scrape.soup, url)))
-                if url and url.strip() != '':
-                    response['duplicates'] = Recipe.objects.filter(space=request.space, source_url=url.strip()).values('id', 'name').all()
+                duplicates = find_duplicate_recipes(
+                    space=request.space,
+                    name=recipe_json.get('name'),
+                    source_url=url.strip() if url else recipe_json.get('source_url'),
+                    recipe_json=recipe_json,
+                    require_name_match=False,
+                )
+                response['duplicates'] = duplicates.values('id', 'name').all()
                 return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_200_OK)
 
             else:
