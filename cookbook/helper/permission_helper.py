@@ -365,6 +365,33 @@ class CustomIsAdmin(permissions.BasePermission):
         return has_group_permission(request.user, ['admin'])
 
 
+class CustomIsIngredientEditor(permissions.BasePermission):
+    """
+    Custom permission class for django rest framework views
+    verifies the user is member of the group: ingredient-editor or admin
+    Admin is always allowed as admin is a higher privilege group.
+    """
+    message = _('You do not have the required permissions to manage ingredient aliases!')
+
+    def has_permission(self, request, view):
+        return has_group_permission(request.user, ['admin']) or has_group_permission(request.user, ['ingredient-editor'], no_cache=True)
+
+
+class CustomIsIngredientEditorOrReadOnly(permissions.BasePermission):
+    """
+    Custom permission class for ingredient alias management.
+    - Read operations (GET, HEAD, OPTIONS): allowed for any authenticated user with at least guest role, or ingredient-editor role
+    - Write operations (POST, PUT, PATCH, DELETE): only allowed for admin or ingredient-editor roles
+    """
+    message = _('You do not have the required permissions to manage ingredient aliases!')
+
+    def has_permission(self, request, view):
+        if request.method in SAFE_METHODS:
+            return (has_group_permission(request.user, ['guest'])
+                    or has_group_permission(request.user, ['ingredient-editor'], no_cache=True))
+        return has_group_permission(request.user, ['admin']) or has_group_permission(request.user, ['ingredient-editor'], no_cache=True)
+
+
 class CustomIsShare(permissions.BasePermission):
     """
     Custom permission class for django rest framework views

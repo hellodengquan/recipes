@@ -83,7 +83,7 @@ from cookbook.helper.permission_helper import (CustomIsAdmin, CustomIsOwner, Cus
                                                above_space_limit,
                                                group_required, has_group_permission, is_space_owner,
                                                switch_user_active_space, CustomAiProviderPermission, IsCreateDRF, CustomIsOwnerDestroyOnly, CustomIsHousehold,
-                                               get_household_user_ids)
+                                               get_household_user_ids, CustomIsIngredientEditorOrReadOnly)
 from cookbook.helper.recipe_search import RecipeSearch
 from cookbook.helper.recipe_url_import import clean_dict, get_from_youtube_scraper, get_images_from_soup
 from cookbook.helper.shopping_helper import RecipeShoppingEditor
@@ -3293,7 +3293,7 @@ class IngredientParserView(viewsets.GenericViewSet):
 
 
 class IngredientAliasViewSet(viewsets.GenericViewSet):
-    permission_classes = [CustomIsAdmin & CustomTokenHasReadWriteScope]
+    permission_classes = [CustomIsIngredientEditorOrReadOnly & CustomTokenHasReadWriteScope]
     serializer_class = IngredientAliasEntrySerializer
 
     def list(self, request, *args, **kwargs):
