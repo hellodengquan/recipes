@@ -43,6 +43,7 @@ import {computed, onMounted, PropType, ref} from "vue";
 import VClosableCardTitle from "@/components/dialogs/VClosableCardTitle.vue";
 import {ApiApi, MealPlan, Recipe, RecipeFlat, RecipeOverview, ShoppingList, type ShoppingListEntryBulkCreate, ShoppingListRecipe} from "@/openapi";
 import {ErrorMessageType, PreparedMessage, useMessageStore} from "@/stores/MessageStore";
+import {useShoppingStore} from "@/stores/ShoppingStore";
 import {ShoppingDialogRecipe, ShoppingDialogRecipeEntry} from "@/types/Shopping";
 import {calculateFoodAmount} from "@/utils/number_utils";
 import {useUserPreferenceStore} from "@/stores/UserPreferenceStore";
@@ -138,6 +139,28 @@ function createShoppingListRecipe() {
     let api = new ApiApi()
     loading.value = true
 
+    const shoppingStore = useShoppingStore()
+    const expectedStates = new Map<string, { checked: boolean; order?: number }>()
+
+    shoppingStore.entries.forEach(entry => {
+        if (entry.food) {
+            const key = `${entry.food.id}_${entry.unit?.id ?? 'null'}`
+            if (!expectedStates.has(key)) {
+                expectedStates.set(key, {
+                    checked: entry.checked ?? false,
+                    order: entry.order
+                })
+            }
+        }
+    })
+
+    let maxOrder = 0
+    shoppingStore.entries.forEach(entry => {
+        if (entry.order !== undefined && entry.order > maxOrder) {
+            maxOrder = entry.order
+        }
+    })
+
     let shoppingListRecipe = {
         recipe: props.recipe.id,
         servings: servings.value,
@@ -155,15 +178,30 @@ function createShoppingListRecipe() {
     dialogRecipes.value.forEach(dialogRecipe => {
         dialogRecipe.entries.forEach(entry => {
             if (entry.checked) {
-                shoppingListEntries.entries.push({
+                const key = `${entry.food?.id}_${entry.unit?.id ?? 'null'}`
+                const existingState = expectedStates.get(key)
+
+                const newEntry = {
                     amount: entry.amount * (servings.value / (recipe.value.servings ? recipe.value.servings : 1)),
                     foodId: entry.food ? entry.food.id! : null,
                     unitId: entry.unit ? entry.unit.id! : null,
                     ingredientId: entry.ingredient ? entry.ingredient.id! : null,
-                })
+                }
+
+                if (!existingState) {
+                    maxOrder += 1
+                    expectedStates.set(key, {
+                        checked: false,
+                        order: maxOrder
+                    })
+                }
+
+                shoppingListEntries.entries.push(newEntry)
             }
         })
     })
+
+    shoppingStore.setExpectedStates(expectedStates, maxOrder)
 
     api.apiShoppingListRecipeCreate({shoppingListRecipe: shoppingListRecipe}).then(slr => {
         api.apiShoppingListRecipeBulkCreateEntriesCreate({id: slr.id!, shoppingListEntryBulkCreate: shoppingListEntries}).then(r => {

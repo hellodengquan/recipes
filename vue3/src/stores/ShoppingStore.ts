@@ -50,6 +50,9 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
     let itemCheckSyncQueue = shallowRef([] as IShoppingSyncQueueEntry[])
     let syncQueueRunning = ref(false)
 
+    let expectedStates = shallowRef(new Map<string, { checked: boolean; order?: number }>())
+    let nextOrder = ref(0)
+
     let entriesByGroup = shallowRef([] as IShoppingListCategory[])
     let entriesByGroupMealPlan = shallowRef([] as IShoppingListCategory[])
     let selectedMealPlan = ref<number | undefined>(undefined)
@@ -92,6 +95,36 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
                     structure = updateEntryInStructure(structure, shoppingListEntry)
                 }
             }
+        })
+
+        structure.categories.forEach(category => {
+            const sortedFoods = new Map<number, IShoppingListFood>(
+                Array.from(category.foods.entries()).sort((a, b) => {
+                    const aEntries = Array.from(a[1].entries.values())
+                    const bEntries = Array.from(b[1].entries.values())
+                    const aMinOrder = Math.min(...aEntries.map(e => e.order ?? Number.MAX_SAFE_INTEGER))
+                    const bMinOrder = Math.min(...bEntries.map(e => e.order ?? Number.MAX_SAFE_INTEGER))
+                    if (aMinOrder !== bMinOrder) {
+                        return aMinOrder - bMinOrder
+                    }
+                    return a[1].food.name.localeCompare(b[1].food.name)
+                })
+            )
+            category.foods = sortedFoods
+
+            category.foods.forEach(food => {
+                const sortedEntries = new Map<number, ShoppingListEntry>(
+                    Array.from(food.entries.entries()).sort((a, b) => {
+                        const aOrder = a[1].order ?? Number.MAX_SAFE_INTEGER
+                        const bOrder = b[1].order ?? Number.MAX_SAFE_INTEGER
+                        if (aOrder !== bOrder) {
+                            return aOrder - bOrder
+                        }
+                        return (a[1].unit?.name ?? '').localeCompare(b[1].unit?.name ?? '')
+                    })
+                )
+                food.entries = sortedEntries
+            })
         })
 
         // ordering
@@ -209,6 +242,16 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
     }
 
     /**
+     * Sets expected states for entries to be applied after the next refresh
+     * @param states Map of foodId_unitId to expected state
+     * @param maxOrder the current maximum order value
+     */
+    function setExpectedStates(states: Map<string, { checked: boolean; order?: number }>, maxOrder: number) {
+        expectedStates.value = states
+        nextOrder.value = maxOrder
+    }
+
+    /**
      * Retrieves all shopping related data (shopping list entries, supermarkets, supermarket categories and shopping list recipes) from API
      * @param mealPlanId optionally filter by mealplan ID and only load entries associated with that
      */
@@ -217,17 +260,34 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
             currentlyUpdating.value = true
             autoSyncLastTimestamp.value = new Date();
 
+            const localState = new Map<number, { checked: boolean; order?: number }>()
+            globalEntriesMap.value.forEach((entry, id) => {
+                localState.set(id, { checked: entry.checked ?? false, order: entry.order })
+            })
+
+            const existingFoodStates = new Map<string, { checked: boolean; order?: number }>()
+            globalEntriesMap.value.forEach(entry => {
+                if (entry.food) {
+                    const key = `${entry.food.id}_${entry.unit?.id ?? 'null'}`
+                    if (!existingFoodStates.has(key)) {
+                        existingFoodStates.set(key, {
+                            checked: entry.checked ?? false,
+                            order: entry.order
+                        })
+                    }
+                }
+            })
+
             let api = new ApiApi()
             let requestParameters = {pageSize: 50, page: 1} as ApiShoppingListEntryListRequest
             if (mealPlanId) {
                 requestParameters.mealplan = mealPlanId
             } else {
-                // only clear local entries when not given a meal plan to not accidentally filter the shopping list
                 globalEntriesMap.value = new Map<number, ShoppingListEntry>
                 initialized.value = false
             }
 
-            recLoadShoppingListEntries(requestParameters)
+            recLoadShoppingListEntries(requestParameters, localState, existingFoodStates)
 
             api.apiSupermarketCategoryList().then(r => {
                 supermarketCategories.value = r.results
@@ -246,27 +306,57 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
     /**
      * recursively load shopping list entries from paginated api
      * @param requestParameters
+     * @param localState optional local state to preserve after loading
+     * @param existingFoodStates optional existing food states to inherit for new entries
      */
-    function recLoadShoppingListEntries(requestParameters: ApiShoppingListEntryListRequest) {
+    function recLoadShoppingListEntries(requestParameters: ApiShoppingListEntryListRequest, localState?: Map<number, { checked: boolean; order?: number }>, existingFoodStates?: Map<string, { checked: boolean; order?: number }>) {
         let api = new ApiApi()
         return api.apiShoppingListEntryList(requestParameters).then((r) => {
             let promises = [] as Promise<any>[]
             let newMap = new Map<number, ShoppingListEntry>()
             r.results.forEach((e) => {
+                if (localState && localState.has(e.id!)) {
+                    const savedState = localState.get(e.id!)!
+                    e.checked = savedState.checked
+                    if (savedState.order !== undefined) {
+                        e.order = savedState.order
+                    }
+                }
+
+                if (existingFoodStates && e.food && (!localState || !localState.has(e.id!))) {
+                    const key = `${e.food.id}_${e.unit?.id ?? 'null'}`
+                    if (existingFoodStates.has(key)) {
+                        const foodState = existingFoodStates.get(key)!
+                        e.checked = foodState.checked
+                        if (foodState.order !== undefined) {
+                            e.order = foodState.order
+                        }
+                    } else if (expectedStates.value.has(key)) {
+                        const expectedState = expectedStates.value.get(key)!
+                        e.checked = expectedState.checked
+                        if (expectedState.order !== undefined) {
+                            e.order = expectedState.order
+                        }
+                    } else if (e.order === undefined) {
+                        nextOrder.value += 1
+                        e.order = nextOrder.value
+                    }
+                }
+
                 newMap.set(e.id!, e)
             })
-            // bulk assign to avoid unnecessary reactivity updates
             globalEntriesMap.value = new Map([...globalEntriesMap.value, ...newMap])
 
             if (requestParameters.page == 1) {
                 if (r.next) {
                     while (Math.ceil(r.count / requestParameters.pageSize) > requestParameters.page) {
                         requestParameters.page = requestParameters.page + 1
-                        promises.push(recLoadShoppingListEntries(requestParameters))
+                        promises.push(recLoadShoppingListEntries(requestParameters, localState, existingFoodStates))
                     }
                 }
 
                 Promise.allSettled(promises).then(() => {
+                    expectedStates.value = new Map()
                     updateEntriesStructure()
                     currentlyUpdating.value = false
                     initialized.value = true
@@ -286,10 +376,24 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
         if (!currentlyUpdating.value && autoSyncHasFocus.value && !hasFailedItems()) {
             currentlyUpdating.value = true
 
+            const pendingSyncIds = new Set<number>()
+            itemCheckSyncQueue.value.forEach(queueEntry => {
+                queueEntry.ids.forEach(id => pendingSyncIds.add(id))
+            })
+
             const api = new ApiApi()
             api.apiShoppingListEntryList({updatedAfter: autoSyncLastTimestamp.value}).then((r) => {
                 autoSyncLastTimestamp.value = r.timestamp!
                 r.results.forEach((e) => {
+                    if (!pendingSyncIds.has(e.id!)) {
+                        const existingEntry = globalEntriesMap.value.get(e.id!)
+                        if (existingEntry) {
+                            e.checked = existingEntry.checked
+                            if (existingEntry.order !== undefined) {
+                                e.order = existingEntry.order
+                            }
+                        }
+                    }
                     globalEntriesMap.value.set(e.id!, e)
                 })
                 if (r.results.length > 0) {
@@ -309,6 +413,33 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
      */
     function createObject(object: ShoppingListEntry, undo: boolean) {
         const api = new ApiApi()
+
+        if (object.food) {
+            const key = `${object.food.id}_${object.unit?.id ?? 'null'}`
+            let foundExisting = false
+            globalEntriesMap.value.forEach(entry => {
+                if (entry.food && `${entry.food.id}_${entry.unit?.id ?? 'null'}` === key) {
+                    if (!foundExisting) {
+                        object.checked = entry.checked ?? false
+                        if (entry.order !== undefined) {
+                            object.order = entry.order
+                        }
+                        foundExisting = true
+                    }
+                }
+            })
+
+            if (!foundExisting && object.order === undefined) {
+                let maxOrder = 0
+                globalEntriesMap.value.forEach(entry => {
+                    if (entry.order !== undefined && entry.order > maxOrder) {
+                        maxOrder = entry.order
+                    }
+                })
+                object.order = maxOrder + 1
+            }
+        }
+
         return api.apiShoppingListEntryCreate({shoppingListEntry: object}).then((r) => {
             globalEntriesMap.value.set(r.id!, r)
             updateEntriesStructure()
@@ -727,6 +858,7 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
         totalFoods,
         shoppingLists,
         selectedMealPlan,
+        setExpectedStates,
         refreshFromAPI,
         autoSync,
         createObject,
