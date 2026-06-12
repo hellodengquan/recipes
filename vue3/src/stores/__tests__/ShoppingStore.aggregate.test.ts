@@ -3,7 +3,7 @@ import { setActivePinia, createPinia } from 'pinia'
 import { useShoppingStore } from '../ShoppingStore'
 import { AggregationLevel } from '@/types/Shopping'
 import type { ShoppingListEntry, Food, Unit, SupermarketCategory } from '@/openapi'
-import { setAnalyticsTrackFn } from '@/utils/analytics'
+import { setAnalyticsTrackFn, setAnalyticsFlushFn, resetAnalytics, flushSync } from '@/utils/analytics'
 import type { AnalyticsEvent } from '@/utils/analytics'
 
 vi.mock('@/stores/MessageStore', () => ({
@@ -61,12 +61,17 @@ describe('ShoppingStore 聚合与撤销功能', () => {
   const pieceUnit = createMockUnit(2, 'Stück')
   const tomato = createMockFood(101, 'Tomato')
 
-  let mockTrack: ReturnType<typeof vi.fn>
+  let mockFlush: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     setActivePinia(createPinia())
-    mockTrack = vi.fn()
-    setAnalyticsTrackFn(mockTrack)
+    resetAnalytics()
+    mockFlush = vi.fn()
+    setAnalyticsFlushFn(mockFlush)
+  })
+
+  afterEach(() => {
+    resetAnalytics()
   })
 
   function setupTestFood(store: ReturnType<typeof useShoppingStore>, entries: ShoppingListEntry[]) {
@@ -363,10 +368,13 @@ describe('ShoppingStore 聚合与撤销功能', () => {
       setupTestFood(store, entries)
 
       const result = store.aggregateFood(tomato.id!)
+      flushSync()
 
       expect(result).not.toBeNull()
-      expect(mockTrack).toHaveBeenCalledTimes(1)
-      const event: AnalyticsEvent = mockTrack.mock.calls[0][0]
+      expect(mockFlush).toHaveBeenCalledTimes(1)
+      const events: AnalyticsEvent[] = mockFlush.mock.calls[0][0]
+      expect(events).toHaveLength(1)
+      const event = events[0]
       expect(event.name).toBe('aggregate.applied')
       expect(event.properties.foodId).toBe(tomato.id)
       expect(event.properties.entryCountBefore).toBe(2)
@@ -385,14 +393,18 @@ describe('ShoppingStore 聚合与撤销功能', () => {
       const food = setupTestFood(store, entries)
 
       store.aggregateFood(tomato.id!)
-      mockTrack.mockClear()
+      flushSync()
+      mockFlush.mockClear()
 
       const beforeUndo = Date.now()
       store.undoAggregateFood(tomato.id!)
+      flushSync()
       const afterUndo = Date.now()
 
-      expect(mockTrack).toHaveBeenCalledTimes(1)
-      const event: AnalyticsEvent = mockTrack.mock.calls[0][0]
+      expect(mockFlush).toHaveBeenCalledTimes(1)
+      const events: AnalyticsEvent[] = mockFlush.mock.calls[0][0]
+      expect(events).toHaveLength(1)
+      const event = events[0]
       expect(event.name).toBe('aggregate.undo')
       expect(event.properties.foodId).toBe(tomato.id)
       expect(event.properties.survivalMs).toBeGreaterThanOrEqual(0)
@@ -412,12 +424,16 @@ describe('ShoppingStore 聚合与撤销功能', () => {
 
       store.aggregateFood(tomato.id!)
       store.aggregateFood(tomato.id!)
-      mockTrack.mockClear()
+      flushSync()
+      mockFlush.mockClear()
 
       store.undoAggregateFood(tomato.id!)
+      flushSync()
 
-      expect(mockTrack).toHaveBeenCalledTimes(1)
-      const event: AnalyticsEvent = mockTrack.mock.calls[0][0]
+      expect(mockFlush).toHaveBeenCalledTimes(1)
+      const events: AnalyticsEvent[] = mockFlush.mock.calls[0][0]
+      expect(events).toHaveLength(1)
+      const event = events[0]
       expect(event.name).toBe('aggregate.undo')
       expect(event.properties.fromLevel).toBe(AggregationLevel.FULL)
       expect(event.properties.toLevel).toBe(AggregationLevel.SEMI)
@@ -430,8 +446,9 @@ describe('ShoppingStore 聚合与撤销功能', () => {
       food.aggregationLevel = AggregationLevel.FULL
 
       store.aggregateFood(tomato.id!)
+      flushSync()
 
-      expect(mockTrack).not.toHaveBeenCalled()
+      expect(mockFlush).not.toHaveBeenCalled()
     })
 
     it('没有历史记录时撤销不应该上报事件', () => {
@@ -440,8 +457,29 @@ describe('ShoppingStore 聚合与撤销功能', () => {
       setupTestFood(store, entries)
 
       store.undoAggregateFood(tomato.id!)
+      flushSync()
 
-      expect(mockTrack).not.toHaveBeenCalled()
+      expect(mockFlush).not.toHaveBeenCalled()
+    })
+
+    it('连续聚合操作应该批量上报事件', () => {
+      const store = useShoppingStore()
+      const entries = [
+        createMockEntry(1, tomato, gramUnit, 500, false, false, 1),
+        createMockEntry(2, tomato, gramUnit, 300, false, false, 2),
+        createMockEntry(3, tomato, pieceUnit, 2, false, false, 3),
+      ]
+      setupTestFood(store, entries)
+
+      store.aggregateFood(tomato.id!)
+      store.aggregateFood(tomato.id!)
+      flushSync()
+
+      expect(mockFlush).toHaveBeenCalledTimes(1)
+      const events: AnalyticsEvent[] = mockFlush.mock.calls[0][0]
+      expect(events).toHaveLength(2)
+      expect(events[0].name).toBe('aggregate.applied')
+      expect(events[1].name).toBe('aggregate.applied')
     })
   })
 })
