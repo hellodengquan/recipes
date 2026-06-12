@@ -7,6 +7,16 @@
         <h2>{% trans "Filters" %}</h2>
         <form method="get" class="form-inline">
             <div class="form-row">
+                <label for="id_from_date">{% trans "From Date" %}:</label>
+                <input type="date" id="id_from_date" name="from_date" 
+                       value="{{ from_date|date:'Y-m-d' }}">
+            </div>
+            <div class="form-row">
+                <label for="id_to_date">{% trans "To Date" %}:</label>
+                <input type="date" id="id_to_date" name="to_date" 
+                       value="{{ to_date|date:'Y-m-d' }}">
+            </div>
+            <div class="form-row">
                 <label for="id_min_limit">{% trans "Min Retry Limit" %}:</label>
                 <input type="number" id="id_min_limit" name="min_limit" 
                        value="{{ min_limit|default:'' }}" min="0"
@@ -27,9 +37,19 @@
             <div class="submit-row">
                 <input type="submit" value="{% trans 'Filter' %}" class="button">
                 <a href="{% url 'admin:cookbook_food_retry_forecast_summary' %}" 
-                   class="button">{% trans "Reset" %}</a>
+                   class="button">{% trans 'Reset' %}</a>
             </div>
         </form>
+        {% if archive_cutoff %}
+        <p class="small">
+            <em>
+                {% trans "Data Source" %}: 
+                {% blocktrans with cutoff=archive_cutoff|date:'Y-m-d' window=archive_window_days %}
+                Last {{ window }} days from ForecastLog (detail), older data from ForecastDailySummary (archived, cutoff: {{ cutoff }}).
+                {% endblocktrans %}
+            </em>
+        </p>
+        {% endif %}
     </div>
 
     <div class="module">
@@ -39,10 +59,11 @@
             {% plural %}
             {{ total_count }} foods with non-default retry limits
             {% endblocktrans %}
+            <small>({{ from_date|date:'Y-m-d' }} - {{ to_date|date:'Y-m-d' }})</small>
         </h2>
         <p class="small">
             {% trans "Showing only foods where reserve_retry_limit != 1 (default). " %}
-            {% trans "Hit count shows total times the retry limit was reached in the last 7 days." %}
+            {% trans "Hit count shows total times the retry limit was reached in the selected date range." %}
         </p>
 
         {% if foods_with_hits %}
@@ -52,7 +73,9 @@
                     <th>{% trans "Food" %}</th>
                     <th>{% trans "Space" %}</th>
                     <th>{% trans "Retry Limit" %}</th>
-                    <th>{% trans "7-day Limit Hit Count" %}</th>
+                    <th>{% trans "Hit Count" %}
+                        <small>({{ from_date|date:'m-d' }} - {{ to_date|date:'m-d' }})</small>
+                    </th>
                     <th>{% trans "Category" %}</th>
                     <th>{% trans "Actions" %}</th>
                 </tr>
@@ -78,9 +101,9 @@
                         {% endif %}
                     </td>
                     <td>
-                        {% if item.hit_count_7d > 0 %}
+                        {% if item.hit_count > 0 %}
                             <span style="color: red; font-weight: bold;">
-                                {{ item.hit_count_7d }}
+                                {{ item.hit_count }}
                             </span>
                         {% else %}
                             <span style="color: #999;">0</span>

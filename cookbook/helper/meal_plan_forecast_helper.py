@@ -12,6 +12,8 @@ from cookbook.helper.permission_helper import get_household_user_ids
 from cookbook.helper.unit_conversion_helper import UnitConversionHelper, ConversionException
 from cookbook.models import (
     Food,
+    ForecastDailySummary,
+    ForecastLog,
     Ingredient,
     InventoryEntry,
     MealPlan,
@@ -33,6 +35,8 @@ class ForecastConflictError(Exception):
 
 
 MAX_OPTIMISTIC_RETRIES = 2
+FORECAST_LOG_ARCHIVE_DAYS = 7
+FORECAST_LOG_ARCHIVE_HOUR = 2
 
 
 @dataclass
@@ -627,3 +631,219 @@ def serialize_forecast_entry(entry: ForecastFoodEntry):
             for u in entry.usages
         ],
     }
+
+
+def get_forecast_log_archive_cutoff(as_of=None):
+    """
+    Returns the datetime before which ForecastLog entries should be archived.
+    Default: 7 days ago from now (midnight).
+    """
+    if as_of is None:
+        as_of = timezone.now()
+    cutoff_date = as_of.date() - timezone.timedelta(days=FORECAST_LOG_ARCHIVE_DAYS)
+    return timezone.make_aware(
+        timezone.datetime.combine(cutoff_date, timezone.datetime.min.time())
+    )
+
+
+def aggregate_forecast_logs_for_date(date, space_ids=None):
+    """
+    Aggregate ForecastLog entries for a given date into ForecastDailySummary.
+
+    Args:
+        date: the date to aggregate (date object)
+        space_ids: optional list of space_ids to restrict aggregation to
+
+    Returns:
+        tuple of (number_of_summaries_created, number_of_summaries_updated)
+    """
+    from django.db.models import Count, Max, Avg, Sum as _Sum
+
+    start_dt = timezone.make_aware(
+        timezone.datetime.combine(date, timezone.datetime.min.time())
+    )
+    end_dt = start_dt + timezone.timedelta(days=1)
+
+    qs = ForecastLog.objects.filter(
+        created_at__gte=start_dt,
+        created_at__lt=end_dt,
+    )
+    if space_ids:
+        qs = qs.filter(space_id__in=space_ids)
+
+    groups = qs.values('food_id', 'space_id').annotate(
+        total_attempts=Count('id'),
+        success_count=Count('id', filter=Q(status='success')),
+        conflict_count=Count('id', filter=Q(status='conflict')),
+        hit_limit_count=Count('id', filter=Q(hit_limit=True)),
+        total_retry_count=_Sum('retry_count'),
+        max_retry_count=Max('retry_count'),
+        avg_retry_limit=Avg('reserve_retry_limit'),
+    )
+
+    created = 0
+    updated = 0
+
+    for row in groups:
+        food_id = row['food_id']
+        space_id = row['space_id']
+
+        defaults = {
+            'total_attempts': row['total_attempts'],
+            'success_count': row['success_count'],
+            'conflict_count': row['conflict_count'],
+            'hit_limit_count': row['hit_limit_count'],
+            'total_retry_count': row['total_retry_count'] or 0,
+            'max_retry_count': row['max_retry_count'] or 0,
+            'avg_retry_limit': row['avg_retry_limit'] or 0,
+        }
+
+        summary, was_created = ForecastDailySummary.objects.update_or_create(
+            food_id=food_id,
+            space_id=space_id,
+            date=date,
+            defaults=defaults,
+        )
+        if was_created:
+            created += 1
+        else:
+            updated += 1
+
+    return created, updated
+
+
+def archive_forecast_logs(as_of=None, dry_run=False, space_ids=None):
+    """
+    Archive ForecastLog entries older than FORECAST_LOG_ARCHIVE_DAYS.
+    1. For each day from (as_of - FORECAST_LOG_ARCHIVE_DAYS) backward,
+       aggregate logs into ForecastDailySummary.
+    2. Delete the raw ForecastLog entries that have been aggregated.
+
+    Args:
+        as_of: reference datetime (default: now)
+        dry_run: if True, do not modify database, just report what would happen
+        space_ids: optional list of space_ids to restrict operation to
+
+    Returns:
+        dict with keys:
+            - days_processed: list of date objects processed
+            - total_summaries_created: int
+            - total_summaries_updated: int
+            - total_logs_deleted: int (or would-be-deleted if dry_run)
+    """
+    if as_of is None:
+        as_of = timezone.now()
+
+    cutoff = get_forecast_log_archive_cutoff(as_of)
+    cutoff_date = cutoff.date()
+
+    days_processed = []
+    total_created = 0
+    total_updated = 0
+    total_deleted = 0
+
+    log_qs = ForecastLog.objects.filter(created_at__lt=cutoff)
+    if space_ids:
+        log_qs = log_qs.filter(space_id__in=space_ids)
+
+    dates_to_process = sorted(
+        set(log_qs.values_list('created_at__date', flat=True).distinct())
+    )
+
+    if not dry_run:
+        with transaction.atomic():
+            for d in dates_to_process:
+                created, updated = aggregate_forecast_logs_for_date(d, space_ids)
+                total_created += created
+                total_updated += updated
+                days_processed.append(d)
+
+            delete_qs = ForecastLog.objects.filter(created_at__lt=cutoff)
+            if space_ids:
+                delete_qs = delete_qs.filter(space_id__in=space_ids)
+            total_deleted = delete_qs.count()
+            delete_qs.delete()
+    else:
+        days_processed = list(dates_to_process)
+        total_deleted = log_qs.count()
+
+    return {
+        'days_processed': days_processed,
+        'total_summaries_created': total_created,
+        'total_summaries_updated': total_updated,
+        'total_logs_deleted': total_deleted,
+    }
+
+
+def get_hit_limit_count_for_foods(
+    food_ids,
+    from_date,
+    to_date,
+    space_ids=None,
+):
+    """
+    Query hit_limit counts for the given foods across the date range,
+    automatically combining ForecastLog (near-term) and ForecastDailySummary
+    (archived) data based on the archive cutoff.
+
+    Args:
+        food_ids: iterable of food IDs to query
+        from_date: date object (inclusive)
+        to_date: date object (inclusive)
+        space_ids: optional list of space IDs to restrict to
+
+    Returns:
+        dict: {food_id: total_hit_limit_count}
+    """
+    from django.db.models import Sum as _Sum
+
+    food_ids = list(food_ids)
+    if not food_ids:
+        return {}
+
+    archive_cutoff = get_forecast_log_archive_cutoff().date()
+
+    result = defaultdict(int)
+
+    if to_date >= archive_cutoff:
+        detail_from = max(from_date, archive_cutoff)
+        detail_to = to_date
+        if detail_from <= detail_to:
+            detail_start = timezone.make_aware(
+                timezone.datetime.combine(detail_from, timezone.datetime.min.time())
+            )
+            detail_end = timezone.make_aware(
+                timezone.datetime.combine(detail_to + timezone.timedelta(days=1),
+                                          timezone.datetime.min.time())
+            )
+
+            qs = ForecastLog.objects.filter(
+                food_id__in=food_ids,
+                created_at__gte=detail_start,
+                created_at__lt=detail_end,
+                hit_limit=True,
+            )
+            if space_ids:
+                qs = qs.filter(space_id__in=space_ids)
+
+            counts = qs.values('food_id').annotate(cnt=Count('id'))
+            for row in counts:
+                result[row['food_id']] += row['cnt']
+
+    if from_date < archive_cutoff:
+        archive_from = from_date
+        archive_to = min(to_date, archive_cutoff - timezone.timedelta(days=1))
+        if archive_from <= archive_to:
+            qs = ForecastDailySummary.objects.filter(
+                food_id__in=food_ids,
+                date__gte=archive_from,
+                date__lte=archive_to,
+            )
+            if space_ids:
+                qs = qs.filter(space_id__in=space_ids)
+
+            counts = qs.values('food_id').annotate(cnt=_Sum('hit_limit_count'))
+            for row in counts:
+                result[row['food_id']] += row['cnt'] or 0
+
+    return dict(result)

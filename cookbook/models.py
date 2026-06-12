@@ -1463,6 +1463,43 @@ class ForecastLog(models.Model, PermissionModelMixin):
         return f'{self.created_at}: {food_name} - {self.status} (retry={self.retry_count})'
 
 
+class ForecastDailySummary(models.Model, PermissionModelMixin):
+    """
+    Pre-aggregated daily summary of ForecastLog data for efficient long-range queries.
+    Populated by daily archive process (7 days after creation).
+    """
+    food = models.ForeignKey(Food, on_delete=models.SET_NULL, null=True, blank=True)
+    space = models.ForeignKey(Space, on_delete=models.CASCADE)
+    date = models.DateField(db_index=True)
+
+    total_attempts = models.PositiveIntegerField(default=0)
+    success_count = models.PositiveIntegerField(default=0)
+    conflict_count = models.PositiveIntegerField(default=0)
+    hit_limit_count = models.PositiveIntegerField(default=0)
+
+    total_retry_count = models.PositiveIntegerField(default=0)
+    max_retry_count = models.PositiveSmallIntegerField(default=0)
+
+    avg_retry_limit = models.DecimalField(default=0, max_digits=6, decimal_places=2)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = ScopedManager(space='space')
+
+    class Meta:
+        ordering = ('-date',)
+        unique_together = ('food', 'space', 'date')
+        indexes = [
+            models.Index(fields=['food', 'date']),
+            models.Index(fields=['date']),
+        ]
+
+    def __str__(self):
+        food_name = self.food.name if self.food else 'N/A'
+        return f'{self.date}: {food_name} - {self.conflict_count} conflicts'
+
+
 class ShareLink(ExportModelOperationsMixin('share_link'), models.Model, PermissionModelMixin):
     recipe = models.ForeignKey(Recipe, on_delete=models.CASCADE)
     uuid = models.UUIDField(default=uuid.uuid4)

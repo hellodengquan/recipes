@@ -307,10 +307,32 @@ class FoodAdmin(TreeAdmin):
         from django.template.response import TemplateResponse
         from django.contrib.admin.views.main import ChangeList
 
-        seven_days_ago = timezone.now() - timezone.timedelta(days=7)
+        from cookbook.helper.meal_plan_forecast_helper import (
+            get_hit_limit_count_for_foods,
+            FORECAST_LOG_ARCHIVE_DAYS,
+            get_forecast_log_archive_cutoff,
+        )
 
+        now = timezone.now()
+        default_from = now - timezone.timedelta(days=7)
+        default_to = now
+
+        from_date_str = request.GET.get('from_date', default_from.strftime('%Y-%m-%d'))
+        to_date_str = request.GET.get('to_date', default_to.strftime('%Y-%m-%d'))
         min_limit = request.GET.get('min_limit', '')
         category_id = request.GET.get('category', '')
+
+        try:
+            from_date = timezone.datetime.strptime(from_date_str, '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            from_date = default_from.date()
+
+        try:
+            to_date = timezone.datetime.strptime(to_date_str, '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            to_date = default_to.date()
+
+        archive_cutoff = get_forecast_log_archive_cutoff().date()
 
         with scopes_disabled():
             qs = Food.objects.exclude(reserve_retry_limit=1).order_by('-reserve_retry_limit', 'name')
@@ -321,20 +343,18 @@ class FoodAdmin(TreeAdmin):
             if category_id and category_id.isdigit():
                 qs = qs.filter(supermarket_category_id=int(category_id))
 
-            hit_counts = {}
-            log_qs = ForecastLog.objects.filter(
-                hit_limit=True,
-                created_at__gte=seven_days_ago,
-                food_id__in=qs.values_list('id', flat=True),
-            ).values('food_id').annotate(count=Count('id'))
-            for row in log_qs:
-                hit_counts[row['food_id']] = row['count']
+            food_ids = list(qs.values_list('id', flat=True))
+            hit_counts = get_hit_limit_count_for_foods(
+                food_ids=food_ids,
+                from_date=from_date,
+                to_date=to_date,
+            )
 
             foods_with_hits = []
             for food in qs.select_related('space', 'supermarket_category'):
                 foods_with_hits.append({
                     'food': food,
-                    'hit_count_7d': hit_counts.get(food.id, 0),
+                    'hit_count': hit_counts.get(food.id, 0),
                 })
 
             categories = SupermarketCategory.objects.all().order_by('name')
@@ -344,10 +364,13 @@ class FoodAdmin(TreeAdmin):
                 'title': 'Food Reserve Retry Forecast Summary',
                 'foods_with_hits': foods_with_hits,
                 'total_count': len(foods_with_hits),
+                'from_date': from_date,
+                'to_date': to_date,
                 'min_limit': min_limit,
                 'category_id': int(category_id) if category_id and category_id.isdigit() else None,
                 'categories': categories,
-                'seven_days_ago': seven_days_ago,
+                'archive_cutoff': archive_cutoff,
+                'archive_window_days': FORECAST_LOG_ARCHIVE_DAYS,
                 'opts': self.model._meta,
                 'has_change_permission': self.has_change_permission(request),
             }
