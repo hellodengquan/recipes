@@ -541,8 +541,8 @@ def test(request):
     if not settings.DEBUG:
         return HttpResponseRedirect(reverse('index'))
 
-    from cookbook.helper.ingredient_parser import IngredientParser
-    parser = IngredientParser(request, False)
+    from cookbook.helper.ingredient_normalization_service import IngredientNormalizationService
+    parser = IngredientNormalizationService(request, request.space)
 
     data = {'original': '90g golden syrup'}
     data['parsed'] = parser.parse(data['original'])

@@ -369,3 +369,253 @@ class TestMultilingualNormalization:
                 merged = zh_service.merge_ingredients(ingredients)
                 assert len(merged) == 1
                 assert merged[0].amount == expected_total
+
+
+class TestChineseCompoundUnitAndWordOrder:
+    def test_cn_amount_before_unit(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('2个 鸡蛋')
+            assert result.amount == Decimal('2')
+            assert '鸡蛋' in result.food_name
+
+    def test_cn_food_before_amount(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('鸡蛋 2个')
+            assert '鸡蛋' in result.food_name
+
+    def test_cn_compound_unit_teaspoon(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('1茶匙 盐')
+            assert result.amount == Decimal('1')
+            assert '盐' in result.food_name
+
+    def test_cn_compound_unit_tablespoon(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('2大匙 酱油')
+            assert result.amount == Decimal('2')
+
+    def test_cn_mixed_chinese_english_unit(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('200g 面粉')
+            assert result.amount == Decimal('200')
+            assert '面粉' in result.food_name
+
+    def test_cn_mixed_chinese_english_ml(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('500ml 牛奶')
+            assert result.amount == Decimal('500')
+            assert '牛奶' in result.food_name
+
+    def test_cn_mixed_chinese_english_kg(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('1.5kg 猪肉')
+            assert result.amount == Decimal('1.5')
+            assert '猪肉' in result.food_name
+
+    def test_cn_fraction_before_unit(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('½茶匙 胡椒粉')
+            assert result.amount == Decimal('0.5')
+
+    def test_cn_mixed_fraction_integer(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('1 ½ 杯 水')
+            assert result.amount == Decimal('1.5')
+
+    def test_cn_fullwidth_number(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('２个 苹果')
+            assert result.amount == Decimal('2')
+
+    def test_cn_compound_unit_with_note(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('3大匙 食用油，加热')
+            assert result.amount == Decimal('3')
+            assert '食用油' in result.food_name
+
+    def test_cn_word_order_consistency_scale(self, zh_service, space_1):
+        with scope(space=space_1):
+            scaled = zh_service.scale('2个 鸡蛋', 3)
+            assert scaled.amount == Decimal('6')
+
+
+class TestFrenchCompoundUnitAndWordOrder:
+    @pytest.fixture
+    def fr_service(self, u1_s1, space_1):
+        user = auth.get_user(u1_s1)
+        request = RequestFactory()
+        request.user = user
+        request.space = space_1
+        return IngredientNormalizationService(request=request, space=space_1, use_cache=False, ignore_automations=True)
+
+    def test_fr_compound_unit_cuillere_a_soupe(self, fr_service, space_1):
+        with scope(space=space_1):
+            result = fr_service.normalize('2 cuillères à soupe farine')
+            assert result.amount == Decimal('2')
+            assert 'farine' in result.food_name
+
+    def test_fr_compound_unit_cuillere_a_cafe(self, fr_service, space_1):
+        with scope(space=space_1):
+            result = fr_service.normalize('1 cuillère à café sel')
+            assert result.amount == Decimal('1')
+            assert 'sel' in result.food_name
+
+    def test_fr_mixed_french_english_g(self, fr_service, space_1):
+        with scope(space=space_1):
+            result = fr_service.normalize('200g beurre')
+            assert result.amount == Decimal('200')
+            assert 'beurre' in result.food_name
+
+    def test_fr_mixed_french_english_ml(self, fr_service, space_1):
+        with scope(space=space_1):
+            result = fr_service.normalize('250ml crème')
+            assert result.amount == Decimal('250')
+            assert 'crème' in result.food_name
+
+    def test_fr_mixed_french_english_kg(self, fr_service, space_1):
+        with scope(space=space_1):
+            result = fr_service.normalize('1,5kg pommes')
+            assert result.amount == Decimal('1.5')
+
+    def test_fr_unit_grammes_vs_g(self, fr_service, space_1):
+        with scope(space=space_1):
+            result1 = fr_service.normalize('100 grammes sucre')
+            result2 = fr_service.normalize('100 g sucre')
+            assert result1.amount == result2.amount
+            assert result1.food_name == result2.food_name
+
+    def test_fr_compound_unit_fraction(self, fr_service, space_1):
+        with scope(space=space_1):
+            result = fr_service.normalize('1/2 cuillère à café poivre')
+            assert result.amount == Decimal('0.5')
+
+    def test_fr_compound_unit_with_note(self, fr_service, space_1):
+        with scope(space=space_1):
+            result = fr_service.normalize('3 cuillères à soupe huile, d\'olive')
+            assert result.amount == Decimal('3')
+
+    def test_fr_word_order_consistency_scale(self, fr_service, space_1):
+        with scope(space=space_1):
+            scaled = fr_service.scale('2 cuillères à soupe farine', 2)
+            assert scaled.amount == Decimal('4')
+
+
+class TestJapaneseCompoundUnitAndWordOrder:
+    @pytest.fixture
+    def jp_service(self, u1_s1, space_1):
+        user = auth.get_user(u1_s1)
+        request = RequestFactory()
+        request.user = user
+        request.space = space_1
+        return IngredientNormalizationService(request=request, space=space_1, use_cache=False, ignore_automations=True)
+
+    def test_jp_amount_before_unit(self, jp_service, space_1):
+        with scope(space=space_1):
+            result = jp_service.normalize('2個 卵')
+            assert result.amount == Decimal('2')
+            assert '卵' in result.food_name
+
+    def test_jp_food_before_amount(self, jp_service, space_1):
+        with scope(space=space_1):
+            result = jp_service.normalize('卵 2個')
+            assert '卵' in result.food_name
+
+    def test_jp_compound_unit_shoukou(self, jp_service, space_1):
+        with scope(space=space_1):
+            result = jp_service.normalize('1小匙 塩')
+            assert result.amount == Decimal('1')
+            assert '塩' in result.food_name
+
+    def test_jp_compound_unit_daikou(self, jp_service, space_1):
+        with scope(space=space_1):
+            result = jp_service.normalize('2大匙 砂糖')
+            assert result.amount == Decimal('2')
+            assert '砂糖' in result.food_name
+
+    def test_jp_mixed_japanese_english_g(self, jp_service, space_1):
+        with scope(space=space_1):
+            result = jp_service.normalize('200g 牛肉')
+            assert result.amount == Decimal('200')
+            assert '牛肉' in result.food_name
+
+    def test_jp_mixed_japanese_english_ml(self, jp_service, space_1):
+        with scope(space=space_1):
+            result = jp_service.normalize('500ml 牛乳')
+            assert result.amount == Decimal('500')
+            assert '牛乳' in result.food_name
+
+    def test_jp_mixed_japanese_english_kg(self, jp_service, space_1):
+        with scope(space=space_1):
+            result = jp_service.normalize('1.5kg 豚肉')
+            assert result.amount == Decimal('1.5')
+            assert '豚肉' in result.food_name
+
+    def test_jp_mixed_katakana_english(self, jp_service, space_1):
+        with scope(space=space_1):
+            result = jp_service.normalize('200グラム 小麦粉')
+            assert result.amount == Decimal('200')
+            assert '小麦粉' in result.food_name
+
+    def test_jp_mixed_ml_katakana(self, jp_service, space_1):
+        with scope(space=space_1):
+            result = jp_service.normalize('300ミリリットル だし汁')
+            assert result.amount == Decimal('300')
+
+    def test_jp_compound_unit_with_note(self, jp_service, space_1):
+        with scope(space=space_1):
+            result = jp_service.normalize('2大匙 みりん、本みりん')
+            assert result.amount == Decimal('2')
+
+    def test_jp_word_order_consistency_scale(self, jp_service, space_1):
+        with scope(space=space_1):
+            scaled = jp_service.scale('2個 卵', 3)
+            assert scaled.amount == Decimal('6')
+
+
+class TestMixedLanguageIngredientParsing:
+    def test_mixed_cn_en_ingredient(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('200g 面粉（all-purpose flour）')
+            assert result.amount == Decimal('200')
+            assert '面粉' in result.food_name
+
+    def test_mixed_jp_en_ingredient(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('100g 味噌（miso paste）')
+            assert result.amount == Decimal('100')
+            assert '味噌' in result.food_name
+
+    def test_mixed_fr_en_ingredient(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('200g beurre (butter)')
+            assert result.amount == Decimal('200')
+            assert 'beurre' in result.food_name
+
+    def test_mixed_cn_en_unit_note(self, zh_service, space_1):
+        with scope(space=space_1):
+            result = zh_service.normalize('1茶匙 vanilla extract')
+            assert result.amount == Decimal('1')
+
+    def test_mixed_consistency_scale_all(self, zh_service, space_1):
+        with scope(space=space_1):
+            test_cases = [
+                ('200g 面粉', Decimal('400')),
+                ('100g beurre', Decimal('200')),
+                ('300g 米', Decimal('600')),
+                ('2個 卵', Decimal('4')),
+            ]
+            for ing, expected in test_cases:
+                scaled = zh_service.scale(ing, 2)
+                assert scaled.amount == expected, f"Failed scaling for '{ing}'"
+
+    def test_mixed_consistency_merge_all(self, zh_service, space_1):
+        with scope(space=space_1):
+            test_pairs = [
+                (['100g 面粉', '200g 面粉'], Decimal('300')),
+                (['50 g sucre', '150 g sucre'], Decimal('200')),
+                (['80 g 砂糖', '120 g 砂糖'], Decimal('200')),
+            ]
+            for ingredients, expected_total in test_pairs:
+                merged = zh_service.merge_ingredients(ingredients)
+                assert len(merged) == 1
+                assert merged[0].amount == expected_total

@@ -3,7 +3,6 @@ import html
 from io import BytesIO
 
 from cookbook.helper.HelperFunctions import safe_request
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import parse_servings, parse_servings_text, parse_time
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Recipe, Step, Keyword
@@ -39,7 +38,6 @@ class RecipeSage(Integration):
 
         recipe.save()
 
-        ingredient_parser = IngredientParser(self.request, True)
         ingredients_added = False
         for s in file['recipeInstructions']:
             txt=html.unescape(s['text'].strip())
@@ -61,12 +59,7 @@ class RecipeSage(Integration):
                         if ingredient[0]=='[' and ingredient[-1]==']':
                             step.ingredients.add(Ingredient.objects.create(is_header=True, original_text=ingredient[1:-1],space=self.request.space,note=ingredient[1:-1],))
                         else:
-                            amount, unit, food, note = ingredient_parser.parse(ingredient.strip())
-                            f = ingredient_parser.get_food(food)
-                            u = ingredient_parser.get_unit(unit)
-                            step.ingredients.add(Ingredient.objects.create(
-                                food=f, unit=u, amount=amount, note=note, original_text=ingredient, space=self.request.space,
-                            ))
+                            step.ingredients.add(self.parse_and_create_ingredient(ingredient.strip())
             recipe.steps.add(step)
 
                 

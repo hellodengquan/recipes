@@ -7,7 +7,6 @@ from django.utils.translation import gettext as _
 
 from cookbook.helper.HelperFunctions import safe_request
 from cookbook.helper.image_processing import get_filetype
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Keyword, Recipe, Step
 
@@ -56,15 +55,9 @@ class RecetteTek(Integration):
 
         try:
             # Process the ingredients. Assumes 1 ingredient per line.
-            ingredient_parser = IngredientParser(self.request, True)
             for ingredient in file['ingredients'].split('\n'):
                 if len(ingredient.strip()) > 0:
-                    amount, unit, food, note = ingredient_parser.parse(ingredient.strip())
-                    f = ingredient_parser.get_food(ingredient)
-                    u = ingredient_parser.get_unit(unit)
-                    step.ingredients.add(Ingredient.objects.create(
-                        food=f, unit=u, amount=amount, note=note, original_text=ingredient, space=self.request.space,
-                    ))
+                    step.ingredients.add(self.parse_and_create_ingredient(ingredient.strip())
         except Exception as e:
             print(recipe.name, ': failed to parse recipe ingredients ', str(e))
         recipe.steps.add(step)

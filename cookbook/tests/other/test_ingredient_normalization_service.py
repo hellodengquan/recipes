@@ -448,3 +448,87 @@ class TestToIngredient:
         service = IngredientNormalizationService(ignore_automations=True)
         with pytest.raises(ValueError, match='Space is required'):
             service.to_ingredient(normalized)
+
+
+class TestGrayscaleAndFallback:
+    def test_grayscale_100_uses_new_service(self, normalization_service, space_1):
+        normalization_service.grayscale_percent = 100
+        with scope(space=space_1):
+            result = normalization_service.normalize('200 g Apple')
+            assert result.amount == Decimal('200')
+            assert result.food_name == 'Apple'
+
+    def test_grayscale_0_uses_fallback(self, normalization_service, space_1):
+        normalization_service.grayscale_percent = 0
+        normalization_service.fallback_enabled = True
+        with scope(space=space_1):
+            result = normalization_service.normalize('200 g Apple')
+            assert isinstance(result, NormalizedIngredient)
+
+    def test_fallback_disabled_uses_new_service(self, normalization_service, space_1):
+        normalization_service.fallback_enabled = False
+        normalization_service.grayscale_percent = 0
+        with scope(space=space_1):
+            result = normalization_service.normalize('200 g Apple')
+            assert result.amount == Decimal('200')
+            assert result.food_name == 'Apple'
+
+    def test_deterministic_grayscale(self, normalization_service, space_1):
+        normalization_service.grayscale_percent = 50
+        normalization_service.fallback_enabled = True
+        with scope(space=space_1):
+            results = set()
+            for _ in range(5):
+                use_new = normalization_service._use_new_service('200 g Apple')
+                results.add(use_new)
+            assert len(results) == 1
+
+    def test_grayscale_50_distributes(self, normalization_service, space_1):
+        normalization_service.grayscale_percent = 50
+        normalization_service.fallback_enabled = True
+        new_count = 0
+        old_count = 0
+        for i in range(100):
+            if normalization_service._use_new_service(f'test ingredient {i}'):
+                new_count += 1
+            else:
+                old_count += 1
+        assert new_count > 10
+        assert old_count > 10
+
+    def test_rollback_on_error(self, normalization_service, space_1):
+        normalization_service.rollback_on_error = True
+        normalization_service.fallback_enabled = True
+        with scope(space=space_1):
+            result = normalization_service._fallback_normalize('200 g Apple')
+            assert isinstance(result, NormalizedIngredient)
+
+    def test_no_rollback_raises_error(self, normalization_service, space_1):
+        normalization_service.rollback_on_error = False
+        normalization_service.fallback_enabled = True
+        with scope(space=space_1):
+            with pytest.raises(Exception):
+                normalization_service._normalize_from_string('')
+
+    def test_fallback_returns_normalized_ingredient(self, normalization_service, space_1):
+        normalization_service.grayscale_percent = 0
+        normalization_service.fallback_enabled = True
+        with scope(space=space_1):
+            result = normalization_service.normalize('100 g Sugar')
+            assert isinstance(result, NormalizedIngredient)
+            assert result.original_text == '100 g Sugar'
+
+    def test_settings_grayscale_config(self, u1_s1, space_1, settings):
+        settings.INGREDIENT_NORMALIZATION_GRAYSCALE_PERCENT = 50
+        settings.INGREDIENT_NORMALIZATION_FALLBACK_ENABLED = True
+        settings.INGREDIENT_NORMALIZATION_FALLBACK_ROLLBACK_ON_ERROR = True
+        settings.INGREDIENT_NORMALIZATION_LOG_COMPARISON = False
+        user = auth.get_user(u1_s1)
+        request = RequestFactory()
+        request.user = user
+        request.space = space_1
+        service = IngredientNormalizationService(request=request, space=space_1, use_cache=False, ignore_automations=True)
+        assert service.grayscale_percent == 50
+        assert service.fallback_enabled is True
+        assert service.rollback_on_error is True
+        assert service.log_comparison is False

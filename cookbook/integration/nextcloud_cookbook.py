@@ -6,7 +6,6 @@ from zipfile import ZipFile
 from PIL import Image
 
 from cookbook.helper.image_processing import get_filetype
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import iso_duration_to_minutes
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Keyword, NutritionInformation, Recipe, Step
@@ -61,7 +60,6 @@ class NextcloudCookbook(Integration):
                     instruction=s, space=self.request.space, show_ingredients_table=self.request.user.userpreference.show_step_ingredients,
                 )
 
-            ingredient_parser = IngredientParser(self.request, True)
             if ingredients_added == False:
                 for ingredient in recipe_json['recipeIngredient']:
                     ingredients_added = True
@@ -69,11 +67,7 @@ class NextcloudCookbook(Integration):
                         subheader = ingredient.replace('##', '', 1)
                         step.ingredients.add(Ingredient.objects.create(note=subheader, is_header=True, no_amount=True, space=self.request.space))
                     else:
-                        amount, unit, food, note = ingredient_parser.parse(ingredient)
-                        f = ingredient_parser.get_food(food)
-                        u = ingredient_parser.get_unit(unit)
-                        step.ingredients.add(Ingredient.objects.create(
-                            food=f, unit=u, amount=amount, note=note, original_text=ingredient, space=self.request.space,))
+                        step.ingredients.add(self.parse_and_create_ingredient(ingredient))
             recipe.steps.add(step)
 
         if 'nutrition' in recipe_json:

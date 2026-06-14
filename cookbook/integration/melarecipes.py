@@ -3,7 +3,6 @@ import json
 from io import BytesIO
 
 from gettext import gettext as _
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import parse_servings, parse_time
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Keyword, Recipe, Step
@@ -60,15 +59,9 @@ class MelaRecipes(Integration):
             instruction=instruction, space=self.request.space, show_ingredients_table=self.request.user.userpreference.show_step_ingredients
         )
 
-        ingredient_parser = IngredientParser(self.request, True)
         for ingredient in recipe_json['ingredients'].split('\n'):
             if ingredient.strip() != '':
-                amount, unit, food, note = ingredient_parser.parse(ingredient)
-                f = ingredient_parser.get_food(food)
-                u = ingredient_parser.get_unit(unit)
-                step.ingredients.add(Ingredient.objects.create(
-                    food=f, unit=u, amount=amount, note=note, original_text=ingredient, space=self.request.space,
-                ))
+                step.ingredients.add(self.parse_and_create_ingredient(ingredient))
         recipe.steps.add(step)
 
         if recipe_json.get("images", None):

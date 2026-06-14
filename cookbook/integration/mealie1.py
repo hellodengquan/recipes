@@ -9,9 +9,7 @@ from gettext import gettext as _
 
 from django.db import transaction
 
-from cookbook.helper import ingredient_parser
 from cookbook.helper.image_processing import get_filetype
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import parse_servings, parse_servings_text, parse_time
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Keyword, Recipe, Step, Food, Unit, SupermarketCategory, PropertyType, Property, MealType, MealPlan, CookLog, ShoppingListEntry
@@ -172,7 +170,6 @@ class Mealie1(Integration):
 
         Recipe.steps.through.objects.bulk_create(steps_relation)
 
-        ingredient_parser = IngredientParser(self.request, True)
 
         self.import_log.msg += f"Importing {len(mealie_database["recipes_ingredients"])} ingredients...\n"
         self.import_log.save()
@@ -208,8 +205,8 @@ class Mealie1(Integration):
                     ingredients_relation.append(Step.ingredients.through(step_id=get_step_id(i, first_step_of_recipe_dict, step_id_dict,recipe_ingredient_ref_link_dict), ingredient_id=ingredient.pk))
                 elif i['note'] and i['note'].strip():
                     amount, unit, food, note = ingredient_parser.parse(i['note'].strip())
-                    f = ingredient_parser.get_food(food)
-                    u = ingredient_parser.get_unit(unit)
+                    f = self.normalization_service.get_or_create_food(food)
+                    u = self.normalization_service.get_or_create_unit(unit)
                     ingredient = Ingredient.objects.create(
                         food=f,
                         unit=u,
@@ -348,8 +345,8 @@ class Mealie1(Integration):
                         ))
                     elif not sli['food_id'] and sli['note'].strip():
                         amount, unit, food, note = ingredient_parser.parse(sli['note'].strip())
-                        f = ingredient_parser.get_food(food)
-                        u = ingredient_parser.get_unit(unit)
+                        f = self.normalization_service.get_or_create_food(food)
+                        u = self.normalization_service.get_or_create_unit(unit)
                         shopping_list_items.append(ShoppingListEntry(
                             amount=amount,
                             unit=u,

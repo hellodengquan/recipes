@@ -1,3 +1,5 @@
+import hashlib
+import logging
 import re
 import string
 import unicodedata
@@ -11,6 +13,8 @@ from django.db.models import Q
 from cookbook.helper.automation_helper import AutomationEngine
 from cookbook.helper.unit_conversion_helper import ConversionException, UnitConversionHelper
 from cookbook.models import Food, Ingredient, Unit
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,6 +42,10 @@ class IngredientNormalizationService:
     auto_unit_conversion = False
     preferred_units = []
     enable_multilingual = True
+    fallback_enabled = True
+    rollback_on_error = True
+    grayscale_percent = 100
+    log_comparison = False
 
     def __init__(self, request=None, space=None, use_cache=None, ignore_automations=None):
         self.request = request
@@ -62,6 +70,14 @@ class IngredientNormalizationService:
             settings, 'INGREDIENT_NORMALIZATION_PREFERRED_UNITS', [])
         self.enable_multilingual = getattr(
             settings, 'INGREDIENT_NORMALIZATION_ENABLE_MULTILINGUAL', True)
+        self.fallback_enabled = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_FALLBACK_ENABLED', True)
+        self.rollback_on_error = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_FALLBACK_ROLLBACK_ON_ERROR', True)
+        self.grayscale_percent = max(0, min(100, getattr(
+            settings, 'INGREDIENT_NORMALIZATION_GRAYSCALE_PERCENT', 100)))
+        self.log_comparison = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_LOG_COMPARISON', False)
 
         if not self.ignore_automations and self.request:
             self.automation = AutomationEngine(self.request, use_cache=self.use_cache)
@@ -195,6 +211,21 @@ class IngredientNormalizationService:
 
         return unit_name.strip()
 
+    @staticmethod
+    def _normalize_fullwidth_chars(text: str) -> str:
+        if not text:
+            return text
+        result = []
+        for char in text:
+            code = ord(char)
+            if 0xFF01 <= code <= 0xFF5E:
+                result.append(chr(code - 0xFEE0))
+            elif code == 0x3000:
+                result.append(' ')
+            else:
+                result.append(char)
+        return ''.join(result)
+
     def get_or_create_food(self, food_name: str) -> Optional[Food]:
         if not food_name or not food_name.strip():
             return None
@@ -312,6 +343,9 @@ class IngredientNormalizationService:
         if len(ingredient) == 0:
             raise ValueError('string to parse cannot be empty')
 
+        if self.enable_multilingual:
+            ingredient = self._normalize_fullwidth_chars(ingredient)
+
         if len(ingredient) > 512:
             raise ValueError('cannot parse ingredients with more than 512 characters')
 
@@ -415,19 +449,35 @@ class IngredientNormalizationService:
         if len(food.strip()) == 0:
             raise ValueError(f'Error parsing string {ingredient}, food cannot be empty')
 
-        note = note[:256].strip()
+        note = note[:self.max_note_length].strip()
 
         return amount, unit, food, note
 
     def normalize(self, ingredient_input: Union[str, Ingredient, dict]) -> NormalizedIngredient:
-        if isinstance(ingredient_input, str):
-            return self._normalize_from_string(ingredient_input)
-        elif isinstance(ingredient_input, Ingredient):
-            return self._normalize_from_ingredient(ingredient_input)
-        elif isinstance(ingredient_input, dict):
-            return self._normalize_from_dict(ingredient_input)
-        else:
-            raise TypeError(f'Unsupported input type: {type(ingredient_input)}')
+        if isinstance(ingredient_input, str) and self.fallback_enabled and not self._use_new_service(ingredient_input):
+            return self._fallback_normalize(ingredient_input)
+
+        try:
+            if isinstance(ingredient_input, str):
+                result = self._normalize_from_string(ingredient_input)
+            elif isinstance(ingredient_input, Ingredient):
+                result = self._normalize_from_ingredient(ingredient_input)
+            elif isinstance(ingredient_input, dict):
+                result = self._normalize_from_dict(ingredient_input)
+            else:
+                raise TypeError(f'Unsupported input type: {type(ingredient_input)}')
+        except Exception as e:
+            if self.rollback_on_error and self.fallback_enabled and isinstance(ingredient_input, str):
+                logger.warning(
+                    'IngredientNormalizationService error, falling back to IngredientParser: %s', str(e)
+                )
+                return self._fallback_normalize(ingredient_input)
+            raise
+
+        if self.log_comparison and isinstance(ingredient_input, str) and self.fallback_enabled:
+            self._log_comparison(ingredient_input, result)
+
+        return result
 
     def _normalize_from_string(self, ingredient_str: str) -> NormalizedIngredient:
         amount, unit_name, food_name, note = self.parse_ingredient_string(ingredient_str)
@@ -703,3 +753,89 @@ class IngredientNormalizationService:
     def normalize_to_ingredient(self, ingredient_input: Union[str, dict], space=None) -> Ingredient:
         normalized = self.normalize(ingredient_input)
         return self.to_ingredient(normalized, space=space)
+
+    def _use_new_service(self, ingredient_text: str) -> bool:
+        """
+        Determine whether to use the new normalization service based on grayscale percentage.
+        Uses deterministic hashing of the ingredient text so the same ingredient always
+        gets the same treatment, ensuring consistency within a session.
+        :param ingredient_text: ingredient string to hash
+        :return: True if new service should be used, False if fallback to old parser
+        """
+        if self.grayscale_percent >= 100:
+            return True
+        if self.grayscale_percent <= 0:
+            return False
+
+        hash_val = int(hashlib.md5(ingredient_text.encode('utf-8')).hexdigest(), 16) % 100
+        return hash_val < self.grayscale_percent
+
+    def _fallback_normalize(self, ingredient_text: str) -> NormalizedIngredient:
+        """
+        Fallback to the old IngredientParser for grayscale or error recovery.
+        This method imports and uses the original IngredientParser to ensure
+        that if the new service is disabled or encounters an error, the system
+        can still process ingredients using the legacy code path.
+        :param ingredient_text: ingredient string to parse
+        :return: NormalizedIngredient object
+        """
+        from cookbook.helper.ingredient_parser import IngredientParser
+
+        try:
+            parser = IngredientParser(self.request, self.use_cache, ignore_automations=self.ignore_automations)
+            amount, unit, food, note = parser.parse(ingredient_text)
+            f = parser.get_food(food) if food else None
+            u = parser.get_unit(unit) if unit else None
+
+            return NormalizedIngredient(
+                amount=self.normalize_amount(amount),
+                unit=u,
+                food=f,
+                note=note or '',
+                original_text=ingredient_text,
+                unit_name=u.name if u else '',
+                food_name=f.name if f else '',
+            )
+        except Exception as e:
+            logger.error(
+                'IngredientParser fallback also failed for "%s": %s', ingredient_text, str(e)
+            )
+            return NormalizedIngredient(
+                amount=Decimal('0'),
+                unit=None,
+                food=None,
+                note=ingredient_text,
+                original_text=ingredient_text,
+                unit_name='',
+                food_name=ingredient_text,
+            )
+
+    def _log_comparison(self, ingredient_text: str, new_result: NormalizedIngredient):
+        """
+        Log a comparison between the new service and old parser results.
+        Used during grayscale validation to detect discrepancies.
+        Only logs when INGREDIENT_NORMALIZATION_LOG_COMPARISON is True.
+        :param ingredient_text: original ingredient string
+        :param new_result: result from the new normalization service
+        """
+        try:
+            from cookbook.helper.ingredient_parser import IngredientParser
+            parser = IngredientParser(self.request, self.use_cache, ignore_automations=self.ignore_automations)
+            old_amount, old_unit, old_food, old_note = parser.parse(ingredient_text)
+
+            discrepancies = []
+            if new_result.amount != self.normalize_amount(old_amount):
+                discrepancies.append(f'amount: new={new_result.amount} old={old_amount}')
+            if (new_result.unit_name or '') != (old_unit or ''):
+                discrepancies.append(f'unit: new={new_result.unit_name} old={old_unit}')
+            if new_result.food_name != old_food:
+                discrepancies.append(f'food: new={new_result.food_name} old={old_food}')
+
+            if discrepancies:
+                logger.info(
+                    'Ingredient normalization comparison for "%s": %s',
+                    ingredient_text,
+                    '; '.join(discrepancies)
+                )
+        except Exception as e:
+            logger.debug('Comparison logging failed: %s', str(e))

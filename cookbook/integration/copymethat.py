@@ -4,7 +4,6 @@ from zipfile import ZipFile
 from bs4 import BeautifulSoup, Tag
 from django.utils.translation import gettext as _
 
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import iso_duration_to_minutes, parse_servings
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Keyword, Recipe, Step
@@ -53,7 +52,6 @@ class CopyMeThat(Integration):
 
         step = Step.objects.create(instruction='', space=self.request.space, show_ingredients_table=self.request.user.userpreference.show_step_ingredients, )
 
-        ingredient_parser = IngredientParser(self.request, True)
 
         ingredients = file.find("ul", {"id": "recipeIngredients"})
         if isinstance(ingredients, Tag):
@@ -70,10 +68,7 @@ class CopyMeThat(Integration):
                             space=self.request.space,
                         ))
                 else:
-                    amount, unit, food, note = ingredient_parser.parse(ingredient.text.strip())
-                    f = ingredient_parser.get_food(food)
-                    u = ingredient_parser.get_unit(unit)
-                    step.ingredients.add(Ingredient.objects.create(food=f, unit=u, amount=amount, note=note, original_text=ingredient.text.strip(), space=self.request.space, ))
+                    step.ingredients.add(self.parse_and_create_ingredient(ingredient.text.strip())
 
         instructions = file.find("ol", {"id": "recipeInstructions"})
         if isinstance(instructions, Tag):

@@ -5,7 +5,6 @@ from typing import Any
 from cookbook.helper.HelperFunctions import safe_request
 import yaml
 
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import (
     parse_servings,
     parse_servings_text,
@@ -57,21 +56,10 @@ class CookBookApp(Integration):
             recipe.steps.add(step)
 
         # Attempt to parse through each ingredient (user freeform so anything goes)
-        ingredient_parser = IngredientParser(self.request, True)
         for ingredient in recipe_json['ingredients']:
             if not ingredient:
                 continue
-            amount, unit, food, note = ingredient_parser.parse(ingredient)
-            f = ingredient_parser.get_food(food)
-            u = ingredient_parser.get_unit(unit)
-            step.ingredients.add(Ingredient.objects.create(
-                food=f,
-                unit=u,
-                amount=amount,
-                note=note,
-                original_text=ingredient,
-                space=self.request.space,
-            ))
+            step.ingredients.add(self.parse_and_create_ingredient(ingredient))
 
         # Tandoor doesn't have notes, append it as the last step
         if 'notes' in recipe_json and len(recipe_json['notes']) > 0:

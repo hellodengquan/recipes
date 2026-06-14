@@ -88,6 +88,15 @@ class Integration:
             normalized.original_text = original_text
         return self.normalization_service.to_ingredient(normalized)
 
+    def parse_and_create_ingredient(self, ingredient_text):
+        """
+        Parse ingredient string and create an Ingredient object with original_text preserved.
+        Replaces the pattern: ingredient_parser.parse() + get_food() + get_unit() + Ingredient.objects.create()
+        :param ingredient_text: ingredient string
+        :return: Ingredient object (not yet saved)
+        """
+        return self.create_ingredient(ingredient_text, original_text=ingredient_text)
+
     def get_zip_file(self, file):
         """
         Safely open a zip file and check the total decompressed size and file count

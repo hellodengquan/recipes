@@ -4,7 +4,6 @@ from io import BytesIO, StringIO
 from zipfile import ZipFile
 
 from cookbook.helper.image_processing import get_filetype
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import parse_servings, parse_servings_text, parse_time
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Keyword, Recipe, Step
@@ -137,7 +136,6 @@ class Chowdown(Integration):
             )
             recipe.steps.add(first_step)
 
-        ingredient_parser = IngredientParser(self.request, True)
         for ingredient in ingredients:
             commentIdx = ingredient.find("##")
             if commentIdx >= 0:
@@ -148,12 +146,7 @@ class Chowdown(Integration):
                         note=ingredient, is_header=True, no_amount=True, original_text=ingredient, space=self.request.space
                     ))
                 else:
-                    amount, unit, food, note = ingredient_parser.parse(ingredient)
-                    f = ingredient_parser.get_food(food)
-                    u = ingredient_parser.get_unit(unit)
-                    first_step.ingredients.add(Ingredient.objects.create(
-                        food=f, unit=u, amount=amount, note=note, original_text=ingredient, space=self.request.space,
-                    ))
+                    step.ingredients.add(self.parse_and_create_ingredient(ingredient))
 
         if image:
             for f in self.files:

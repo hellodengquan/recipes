@@ -2,7 +2,6 @@ import base64
 from io import BytesIO
 from lxml import etree
 
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import parse_servings, parse_servings_text
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Keyword, Recipe, Step
@@ -41,7 +40,6 @@ class Rezeptsuitede(Integration):
             except Exception:
                 pass
 
-        ingredient_parser = IngredientParser(self.request, True)
 
         if recipe_xml.find('part').find('ingredient') is not None:
             ingredient_step = recipe.steps.first()
@@ -49,13 +47,13 @@ class Rezeptsuitede(Integration):
                 ingredient_step = Step.objects.create(space=self.request.space, instruction='')
 
             for ingredient in recipe_xml.find('part').findall('ingredient'):
-                f = ingredient_parser.get_food(ingredient.attrib['item'])
-                u = ingredient_parser.get_unit(ingredient.attrib['unit'])
+                f = self.normalization_service.get_or_create_food(ingredient.attrib['item'])
+                u = self.normalization_service.get_or_create_unit(ingredient.attrib['unit'])
                 amount = 0
                 if ingredient.attrib['qty'].strip() != '':
                     try:
-                        amount, unit, note = ingredient_parser.parse_amount(ingredient.attrib['qty'])
-                    except ValueError:  # sometimes quantities contain words which cant be parsed
+                        amount, unit, note = self.normalization_service.parse_amount(ingredient.attrib['qty'])
+                    except ValueError:
                         pass
                 ingredient_step.ingredients.add(Ingredient.objects.create(food=f, unit=u, amount=amount, space=self.request.space, ))
 

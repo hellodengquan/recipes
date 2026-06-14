@@ -6,7 +6,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 
-from cookbook.helper.ingredient_parser import IngredientParser
+from cookbook.helper.ingredient_normalization_service import IngredientNormalizationService
 from cookbook.helper.HelperFunctions import safe_request
 from cookbook.helper.permission_helper import group_required
 from cookbook.models import ShoppingListEntry, TelegramBot
@@ -50,10 +50,10 @@ def hook(request, token):
         if tb.chat_id == str(data['message']['chat']['id']):
             request.space = tb.space  # TODO this is likely a bad idea. Verify and test
             request.user = tb.created_by
-            ingredient_parser = IngredientParser(request, False)
-            amount, unit, food, note = ingredient_parser.parse(data['message']['text'])
-            f = ingredient_parser.get_food(food)
-            u = ingredient_parser.get_unit(unit)
+            normalization_service = IngredientNormalizationService(request=request, space=request.space)
+            amount, unit, food, note = normalization_service.parse(data['message']['text'])
+            f = normalization_service.get_food(food)
+            u = normalization_service.get_unit(unit)
 
             ShoppingListEntry.objects.create(food=f, unit=u, amount=max(1, amount), created_by=request.user, space=request.space)
 

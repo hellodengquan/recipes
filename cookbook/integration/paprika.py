@@ -6,7 +6,6 @@ from gettext import gettext as _
 from io import BytesIO
 
 from cookbook.helper.HelperFunctions import safe_request
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import parse_servings, parse_servings_text
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Keyword, Recipe, Step
@@ -67,16 +66,10 @@ class Paprika(Integration):
                     keyword, created = Keyword.objects.get_or_create(name=c.strip(), space=self.request.space)
                     recipe.keywords.add(keyword)
 
-            ingredient_parser = IngredientParser(self.request, True)
             try:
                 for ingredient in recipe_json['ingredients'].split('\n'):
                     if len(ingredient.strip()) > 0:
-                        amount, unit, food, note = ingredient_parser.parse(ingredient)
-                        f = ingredient_parser.get_food(food)
-                        u = ingredient_parser.get_unit(unit)
-                        step.ingredients.add(Ingredient.objects.create(
-                            food=f, unit=u, amount=amount, note=note, original_text=ingredient, space=self.request.space,
-                        ))
+                        step.ingredients.add(self.parse_and_create_ingredient(ingredient))
             except AttributeError:
                 pass
 

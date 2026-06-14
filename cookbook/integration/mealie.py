@@ -4,7 +4,6 @@ from io import BytesIO
 from zipfile import ZipFile
 
 from cookbook.helper.image_processing import get_filetype
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import parse_servings, parse_servings_text, parse_time
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Keyword, Recipe, Step
@@ -36,23 +35,19 @@ class Mealie(Integration):
         if len(recipe_json['description'].strip()) > 500:
             step.instruction = recipe_json['description'].strip() + '\n\n' + step.instruction
 
-        ingredient_parser = IngredientParser(self.request, True)
         for ingredient in recipe_json['recipe_ingredient']:
             try:
                 if ingredient['food']:
-                    f = ingredient_parser.get_food(ingredient['food'])
-                    u = ingredient_parser.get_unit(ingredient['unit'])
+                    f = self.normalization_service.get_or_create_food(ingredient['food'])
+                    u = self.normalization_service.get_or_create_unit(ingredient['unit'])
                     amount = ingredient['quantity']
                     note = ingredient['note']
                     original_text = None
+                    step.ingredients.add(Ingredient.objects.create(
+                        food=f, unit=u, amount=amount, note=note, original_text=ingredient.get('original_text', ''), space=self.request.space,
+                    ))
                 else:
-                    amount, unit, food, note = ingredient_parser.parse(ingredient['note'])
-                    f = ingredient_parser.get_food(food)
-                    u = ingredient_parser.get_unit(unit)
-                    original_text = ingredient['note']
-                step.ingredients.add(Ingredient.objects.create(
-                    food=f, unit=u, amount=amount, note=note, original_text=original_text, space=self.request.space,
-                ))
+                    step.ingredients.add(self.parse_and_create_ingredient(ingredient['note']))
             except Exception:
                 pass
 

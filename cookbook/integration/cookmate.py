@@ -1,7 +1,6 @@
 from io import BytesIO
 
 from cookbook.helper.HelperFunctions import safe_request
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import parse_servings, parse_servings_text, parse_time
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Recipe, Step
@@ -47,7 +46,6 @@ class Cookmate(Integration):
                     )
                     recipe.steps.add(step)
 
-        ingredient_parser = IngredientParser(self.request, True)
 
         if recipe_ingredients := recipe_xml.find('ingredient'):
             ingredient_step = recipe.steps.first()
@@ -57,11 +55,7 @@ class Cookmate(Integration):
             for ingredient in recipe_ingredients.getchildren():
                 if ingredient.text:
                     if ingredient.text.strip() != '':
-                        amount, unit, food, note = ingredient_parser.parse(ingredient.text.strip())
-                        f = ingredient_parser.get_food(food)
-                        u = ingredient_parser.get_unit(unit)
-                        ingredient_step.ingredients.add(Ingredient.objects.create(
-                            food=f, unit=u, amount=amount, note=note, original_text=ingredient.text.strip(), space=self.request.space,
+                        step.ingredients.add(self.parse_and_create_ingredient(ingredient.text.strip())
                         ))
 
         if recipe_xml.find('imageurl') is not None:

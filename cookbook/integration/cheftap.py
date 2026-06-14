@@ -1,6 +1,3 @@
-import re
-
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Recipe, Step
 
@@ -12,6 +9,7 @@ class ChefTap(Integration):
         return re.match(r'^cheftap_export/([A-Za-z\d\s\-_()\[\]\u00C0-\u017F])+.txt$', zip_info_object.filename) or re.match(r'^([A-Za-z\d\s\-_()\[\]\u00C0-\u017F])+.txt$', zip_info_object.filename)
 
     def get_recipe_from_file(self, file):
+        import re
         source_url = ''
 
         ingredient_mode = 0
@@ -42,15 +40,9 @@ class ChefTap(Integration):
             step.instruction += '\n' + source_url
             step.save()
 
-        ingredient_parser = IngredientParser(self.request, True)
         for ingredient in ingredients:
             if len(ingredient.strip()) > 0:
-                amount, unit, food, note = ingredient_parser.parse(ingredient)
-                f = ingredient_parser.get_food(food)
-                u = ingredient_parser.get_unit(unit)
-                step.ingredients.add(Ingredient.objects.create(
-                    food=f, unit=u, amount=amount, note=note, original_text=ingredient, space=self.request.space,
-                ))
+                step.ingredients.add(self.parse_and_create_ingredient(ingredient))
         recipe.steps.add(step)
 
         return recipe

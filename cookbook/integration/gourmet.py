@@ -6,7 +6,6 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup, Tag
 
-from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import parse_servings, parse_servings_text, parse_time, iso_duration_to_minutes
 from cookbook.integration.integration import Integration
 from cookbook.models import Ingredient, Recipe, Step, Keyword
@@ -22,7 +21,7 @@ class Gourmet(Integration):
         soup = BeautifulSoup(text_obj, "html.parser")
         return soup.find_all("div", {"class": "recipe"})
 
-    def get_ingredients_recursive(self, step, ingredients, ingredient_parser):
+    def get_ingredients_recursive(self, step, ingredients):
         if isinstance(ingredients, Tag):
             for ingredient in ingredients.children:
                 if not isinstance(ingredient, Tag):
@@ -38,20 +37,11 @@ class Gourmet(Integration):
                         space=self.request.space,
                     ))
                     next_ingrediets = ingredient.find("ul", {"class": "ing"})
-                    self.get_ingredients_recursive(step, next_ingrediets, ingredient_parser)
+                    self.get_ingredients_recursive(step, next_ingrediets)
 
                 else:
                     try:
-                        amount, unit, food, note = ingredient_parser.parse(ingredient.text.strip())
-                        f = ingredient_parser.get_food(food)
-                        u = ingredient_parser.get_unit(unit)
-                        step.ingredients.add(
-                            Ingredient.objects.create(
-                                food=f,
-                                unit=u,
-                                amount=amount,
-                                note=note,
-                                original_text=ingredient.text.strip(),
+                        step.ingredients.add(self.parse_and_create_ingredient(ingredient.text.strip())
                                 space=self.request.space,
                             )
                         )
@@ -131,10 +121,9 @@ class Gourmet(Integration):
             show_ingredients_table=self.request.user.userpreference.show_step_ingredients,
         )
 
-        ingredient_parser = IngredientParser(self.request, True)
 
         ingredients = file.find("ul", {"class": "ing"})
-        self.get_ingredients_recursive(step, ingredients, ingredient_parser)
+        self.get_ingredients_recursive(step, ingredients)
 
         instructions = file.find("div", {"class": "instructions"})
         if isinstance(instructions, Tag):
