@@ -46,6 +46,17 @@ class IngredientNormalizationService:
     rollback_on_error = True
     grayscale_percent = 100
     log_comparison = False
+    cache_ttl = 86400
+    cache_version = 1
+    nlp_chinese_backend = 'auto'
+    nlp_japanese_backend = 'auto'
+
+    _nlp_chinese_available = None
+    _nlp_japanese_available = None
+    _jieba = None
+    _mecab = None
+
+    CACHE_KEY_PREFIX = 'ing_norm_v'
 
     def __init__(self, request=None, space=None, use_cache=None, ignore_automations=None):
         self.request = request
@@ -78,6 +89,14 @@ class IngredientNormalizationService:
             settings, 'INGREDIENT_NORMALIZATION_GRAYSCALE_PERCENT', 100)))
         self.log_comparison = getattr(
             settings, 'INGREDIENT_NORMALIZATION_LOG_COMPARISON', False)
+        self.cache_ttl = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_CACHE_TTL', 86400)
+        self.cache_version = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_CACHE_VERSION', 1)
+        self.nlp_chinese_backend = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_NLP_CHINESE_BACKEND', 'auto')
+        self.nlp_japanese_backend = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_NLP_JAPANESE_BACKEND', 'auto')
 
         if not self.ignore_automations and self.request:
             self.automation = AutomationEngine(self.request, use_cache=self.use_cache)
@@ -178,6 +197,146 @@ class IngredientNormalizationService:
             d = Decimal(str(int(d)))
 
         return d
+
+    def is_chinese_nlp_available(self) -> bool:
+        if IngredientNormalizationService._nlp_chinese_available is not None:
+            return IngredientNormalizationService._nlp_chinese_available
+        try:
+            if self.nlp_chinese_backend == 'none':
+                IngredientNormalizationService._nlp_chinese_available = False
+            elif self.nlp_chinese_backend in ('auto', 'jieba'):
+                import jieba as _jieba  # noqa: F401
+                IngredientNormalizationService._jieba = _jieba
+                IngredientNormalizationService._nlp_chinese_available = True
+            else:
+                IngredientNormalizationService._nlp_chinese_available = False
+        except ImportError:
+            IngredientNormalizationService._nlp_chinese_available = False
+        return IngredientNormalizationService._nlp_chinese_available
+
+    def is_japanese_nlp_available(self) -> bool:
+        if IngredientNormalizationService._nlp_japanese_available is not None:
+            return IngredientNormalizationService._nlp_japanese_available
+        try:
+            if self.nlp_japanese_backend == 'none':
+                IngredientNormalizationService._nlp_japanese_available = False
+            elif self.nlp_japanese_backend in ('auto', 'mecab'):
+                from MeCab import Tagger as _Tagger  # noqa: F401
+                IngredientNormalizationService._mecab = _Tagger
+                IngredientNormalizationService._nlp_japanese_available = True
+            else:
+                IngredientNormalizationService._nlp_japanese_available = False
+        except ImportError:
+            IngredientNormalizationService._nlp_japanese_available = False
+        return IngredientNormalizationService._nlp_japanese_available
+
+    def _get_cache(self):
+        try:
+            from django.core.cache import caches
+            return caches['default']
+        except Exception:
+            return None
+
+    def _get_cache_key(self, ingredient_text: str) -> Optional[str]:
+        if not self.space:
+            return None
+        hashed = hashlib.sha256(ingredient_text.encode('utf-8')).hexdigest()
+        return f'{self.CACHE_KEY_PREFIX}{self.cache_version}_sp{self.space.id}_{hashed}'
+
+    def _get_cached_normalized(self, ingredient_text: str) -> Optional[NormalizedIngredient]:
+        if not self.use_cache:
+            return None
+        cache = self._get_cache()
+        if not cache:
+            return None
+        key = self._get_cache_key(ingredient_text)
+        if not key:
+            return None
+        try:
+            data = cache.get(key)
+            if not data:
+                return None
+            return self._dict_to_normalized(data)
+        except Exception as e:
+            logger.debug('Cache read failed: %s', str(e))
+            return None
+
+    def _set_cached_normalized(self, ingredient_text: str, normalized: NormalizedIngredient):
+        if not self.use_cache:
+            return
+        cache = self._get_cache()
+        if not cache:
+            return
+        key = self._get_cache_key(ingredient_text)
+        if not key:
+            return
+        try:
+            data = self._normalized_to_dict(normalized)
+            cache.set(key, data, self.cache_ttl)
+        except Exception as e:
+            logger.debug('Cache write failed: %s', str(e))
+
+    def _normalized_to_dict(self, n: NormalizedIngredient) -> dict:
+        return {
+            'a': str(n.amount),
+            'u_id': n.unit.id if n.unit else None,
+            'u_name': n.unit_name,
+            'f_id': n.food.id if n.food else None,
+            'f_name': n.food_name,
+            'note': n.note,
+            'orig': n.original_text,
+        }
+
+    def _dict_to_normalized(self, d: dict) -> NormalizedIngredient:
+        unit = None
+        food = None
+        if self.space and d.get('u_id'):
+            try:
+                unit = Unit.objects.filter(id=d['u_id'], space=self.space).first()
+            except Exception:
+                unit = None
+        if self.space and d.get('f_id'):
+            try:
+                food = Food.objects.filter(id=d['f_id'], space=self.space).first()
+            except Exception:
+                food = None
+        return NormalizedIngredient(
+            amount=Decimal(d.get('a', '0')),
+            unit=unit,
+            food=food,
+            note=d.get('note', ''),
+            original_text=d.get('orig', ''),
+            unit_name=d.get('u_name', ''),
+            food_name=d.get('f_name', ''),
+        )
+
+    @classmethod
+    def invalidate_space_cache(cls, space_id: int):
+        try:
+            from django.core.cache import caches
+            cache = caches['default']
+            pattern = f'{cls.CACHE_KEY_PREFIX}*_sp{space_id}_*'
+            try:
+                cache.delete_pattern(pattern)
+            except (AttributeError, NotImplementedError):
+                pass
+        except Exception as e:
+            logger.debug('Cache invalidation failed: %s', str(e))
+
+    @classmethod
+    def bump_cache_version(cls, delta: int = 1) -> int:
+        from django.core.cache import caches
+        cache = caches['default']
+        ver_key = f'{cls.CACHE_KEY_PREFIX}_global_version'
+        try:
+            new_ver = cache.incr(ver_key, delta)
+        except Exception:
+            new_ver = getattr(settings, 'INGREDIENT_NORMALIZATION_CACHE_VERSION', 1) + delta
+            try:
+                cache.set(ver_key, new_ver, 60 * 60 * 24 * 365)
+            except Exception:
+                pass
+        return new_ver
 
     def normalize_name(self, name: str) -> str:
         if not name:
@@ -457,6 +616,13 @@ class IngredientNormalizationService:
         if isinstance(ingredient_input, str) and self.fallback_enabled and not self._use_new_service(ingredient_input):
             return self._fallback_normalize(ingredient_input)
 
+        if isinstance(ingredient_input, str) and self.use_cache:
+            cached = self._get_cached_normalized(ingredient_input)
+            if cached is not None:
+                if self.log_comparison:
+                    self._log_comparison(ingredient_input, cached)
+                return cached
+
         try:
             if isinstance(ingredient_input, str):
                 result = self._normalize_from_string(ingredient_input)
@@ -473,6 +639,9 @@ class IngredientNormalizationService:
                 )
                 return self._fallback_normalize(ingredient_input)
             raise
+
+        if isinstance(ingredient_input, str) and self.use_cache:
+            self._set_cached_normalized(ingredient_input, result)
 
         if self.log_comparison and isinstance(ingredient_input, str) and self.fallback_enabled:
             self._log_comparison(ingredient_input, result)

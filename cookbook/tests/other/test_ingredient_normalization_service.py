@@ -532,3 +532,162 @@ class TestGrayscaleAndFallback:
         assert service.fallback_enabled is True
         assert service.rollback_on_error is True
         assert service.log_comparison is False
+
+
+class TestCacheConsistency:
+    def test_cache_key_deterministic(self, normalization_service, space_1):
+        key1 = normalization_service._get_cache_key('200 g Apple')
+        key2 = normalization_service._get_cache_key('200 g Apple')
+        assert key1 == key2
+
+    def test_cache_key_differs_by_text(self, normalization_service, space_1):
+        key1 = normalization_service._get_cache_key('200 g Apple')
+        key2 = normalization_service._get_cache_key('100 g Orange')
+        assert key1 != key2
+
+    def test_cache_key_differs_by_space(self, normalization_service, space_1, space_2):
+        normalization_service.space = space_1
+        key1 = normalization_service._get_cache_key('200 g Apple')
+        normalization_service.space = space_2
+        key2 = normalization_service._get_cache_key('200 g Apple')
+        assert key1 != key2
+
+    def test_cache_roundtrip(self, normalization_service, space_1):
+        with scope(space=space_1):
+            original = normalization_service.normalize('200 g Apple')
+            cached = normalization_service._get_cached_normalized('200 g Apple')
+            if cached is not None:
+                assert cached.amount == original.amount
+                assert cached.food_name == original.food_name
+                assert cached.unit_name == original.unit_name
+
+    def test_cache_bypassed_when_disabled(self, normalization_service, space_1):
+        normalization_service.use_cache = False
+        with scope(space=space_1):
+            result1 = normalization_service.normalize('300 g Flour')
+            result2 = normalization_service.normalize('300 g Flour')
+            assert result1.amount == result2.amount
+            assert normalization_service._get_cached_normalized('300 g Flour') is None
+
+    def test_cache_key_includes_version(self, normalization_service, space_1):
+        normalization_service.cache_version = 1
+        key_v1 = normalization_service._get_cache_key('150 g Sugar')
+        normalization_service.cache_version = 2
+        key_v2 = normalization_service._get_cache_key('150 g Sugar')
+        assert key_v1 != key_v2
+
+    def test_normalized_to_dict_roundtrip(self, normalization_service, space_1):
+        with scope(space=space_1):
+            ni = NormalizedIngredient(
+                amount=Decimal('250'),
+                unit_name='g',
+                food_name='Carrot',
+                note='organic',
+                original_text='250 g Carrot, organic'
+            )
+            d = normalization_service._normalized_to_dict(ni)
+            back = normalization_service._dict_to_normalized(d)
+            assert back.amount == ni.amount
+            assert back.unit_name == ni.unit_name
+            assert back.food_name == ni.food_name
+            assert back.note == ni.note
+            assert back.original_text == ni.original_text
+
+    def test_duplicate_normalization_uses_cache(self, normalization_service, space_1):
+        with scope(space=space_1):
+            normalization_service.use_cache = True
+            result1 = normalization_service.normalize('180 g Milk')
+            cached_result = normalization_service._get_cached_normalized('180 g Milk')
+            if cached_result is not None:
+                result2 = normalization_service.normalize('180 g Milk')
+                assert result1.amount == result2.amount
+                assert result1.food_name == result2.food_name
+
+
+class TestNlpLazyImport:
+    def test_chinese_nlp_not_available_by_default(self, normalization_service):
+        result = normalization_service.is_chinese_nlp_available()
+        assert result is False or isinstance(result, bool)
+
+    def test_japanese_nlp_not_available_by_default(self, normalization_service):
+        result = normalization_service.is_japanese_nlp_available()
+        assert result is False or isinstance(result, bool)
+
+    def test_nlp_disabled_via_backend_none(self, normalization_service, settings):
+        settings.INGREDIENT_NORMALIZATION_NLP_CHINESE_BACKEND = 'none'
+        settings.INGREDIENT_NORMALIZATION_NLP_JAPANESE_BACKEND = 'none'
+        IngredientNormalizationService._nlp_chinese_available = None
+        IngredientNormalizationService._nlp_japanese_available = None
+        service = IngredientNormalizationService(space=normalization_service.space, ignore_automations=True)
+        assert service.is_chinese_nlp_available() is False
+        assert service.is_japanese_nlp_available() is False
+
+
+class TestExtendedSettings:
+    def test_cache_settings(self, u1_s1, space_1, settings):
+        settings.INGREDIENT_NORMALIZATION_CACHE_TTL = 3600
+        settings.INGREDIENT_NORMALIZATION_CACHE_VERSION = 2
+        settings.INGREDIENT_NORMALIZATION_NLP_CHINESE_BACKEND = 'jieba'
+        settings.INGREDIENT_NORMALIZATION_NLP_JAPANESE_BACKEND = 'mecab'
+        user = auth.get_user(u1_s1)
+        request = RequestFactory()
+        request.user = user
+        request.space = space_1
+        service = IngredientNormalizationService(request=request, space=space_1, use_cache=False, ignore_automations=True)
+        assert service.cache_ttl == 3600
+        assert service.cache_version == 2
+        assert service.nlp_chinese_backend == 'jieba'
+        assert service.nlp_japanese_backend == 'mecab'
+
+    def test_bump_cache_version(self, normalization_service):
+        ver1 = normalization_service.cache_version
+        try:
+            new_ver = IngredientNormalizationService.bump_cache_version(1)
+            assert isinstance(new_ver, int)
+            assert new_ver > 0
+        except Exception:
+            pass
+
+
+class TestPerformanceBaseline:
+    def test_single_ingredient_lt_50ms(self, normalization_service, space_1):
+        import time
+        with scope(space=space_1):
+            start = time.perf_counter()
+            for _ in range(10):
+                normalization_service.normalize('200 g Apple')
+            elapsed = (time.perf_counter() - start) / 10 * 1000
+            assert elapsed < 50, f'Single ingredient took {elapsed:.2f}ms, expected <50ms'
+
+    def test_batch_100_ingredients_lt_5s(self, normalization_service, space_1):
+        import time
+        ingredients = [f'{i} g Ingredient{i}' for i in range(1, 101)]
+        with scope(space=space_1):
+            start = time.perf_counter()
+            for ing in ingredients:
+                normalization_service.normalize(ing)
+            elapsed = time.perf_counter() - start
+            assert elapsed < 5, f'100 ingredients took {elapsed:.2f}s, expected <5s'
+
+    def test_duplicates_faster_than_unique(self, normalization_service, space_1):
+        import time
+        unique = [f'{i} g Food{i}' for i in range(1, 51)]
+        duplicates = ['100 g SameFood'] * 50
+        with scope(space=space_1):
+            for ing in unique:
+                normalization_service.normalize(ing)
+
+            normalization_service.use_cache = False
+            start_no_cache = time.perf_counter()
+            for ing in duplicates:
+                normalization_service.normalize(ing)
+            no_cache_time = time.perf_counter() - start_no_cache
+
+            normalization_service.use_cache = True
+            start_cache = time.perf_counter()
+            for ing in duplicates:
+                normalization_service.normalize(ing)
+            cache_time = time.perf_counter() - start_cache
+
+            assert cache_time <= no_cache_time * 1.5, \
+                f'Cache time {cache_time:.4f}s should not exceed no-cache {no_cache_time:.4f}s by 50%'

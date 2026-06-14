@@ -3,6 +3,14 @@ FROM python:3.13-alpine3.23
 #Install all dependencies.
 RUN apk add --no-cache postgresql-libs postgresql-client gettext zlib libjpeg libwebp libxml2-dev libxslt-dev openldap git libgcc libstdc++ nginx tini envsubst nodejs npm
 
+# Optional: Install Mecab for Japanese NLP support (set ENABLE_JAPANESE_NLP=1 at build time)
+ARG ENABLE_JAPANESE_NLP=0
+RUN if [ "$ENABLE_JAPANESE_NLP" = "1" ]; then apk add --no-cache mecab mecab-ipadic; fi
+
+# Optional multilingual NLP packages (commented out by default, can be enabled via build args)
+ARG ENABLE_CHINESE_NLP=0
+ARG ENABLE_MULTILANG_NLP=0
+
 #Print all logs without buffering it.
 ENV PYTHONUNBUFFERED=1 \
     DOCKER=true
@@ -24,7 +32,14 @@ RUN apk add --no-cache --virtual .build-deps gcc musl-dev postgresql-dev zlib-de
     venv/bin/pip debug -v && \
     venv/bin/pip install wheel==0.45.1 && \
     venv/bin/pip install setuptools_rust==1.10.2 && \
-    venv/bin/pip install -r requirements.txt --no-cache-dir &&\
+    venv/bin/pip install -r requirements.txt --no-cache-dir && \
+    # Install optional multilingual NLP packages if enabled
+    if [ "$ENABLE_CHINESE_NLP" = "1" ] || [ "$ENABLE_MULTILANG_NLP" = "1" ]; then \
+        venv/bin/pip install jieba>=0.42.1 --no-cache-dir; \
+    fi && \
+    if [ "$ENABLE_JAPANESE_NLP" = "1" ] || [ "$ENABLE_MULTILANG_NLP" = "1" ]; then \
+        venv/bin/pip install mecab-python3>=1.0.9 --no-cache-dir; \
+    fi && \
     apk --purge del .build-deps
 
 #Copy project and execute it.

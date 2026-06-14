@@ -55,6 +55,11 @@ thefuzz==0.22.1
 stripe==14.0.0
 frappe-client==0.1.0.dev0
 
+# Optional Multilingual NLP Support (for ingredient normalization)
+# Install these if you need enhanced Chinese/Japanese ingredient parsing
+# jieba>=0.42.1            # Chinese tokenizer
+# mecab-python3>=1.0.9     # Japanese tokenizer
+
 # Development
 pytest== 8.4.2
 pytest-django==4.11.1
