@@ -167,16 +167,16 @@ def invalidate_household_cache_on_delete(sender, instance=None, **kwargs):
     if instance and instance.household_id:
         caches['default'].delete(f'household_user_ids_{instance.space_id}_{instance.household_id}')
     if instance:
-        invalidate_user_permission_cache(instance.user_id)
+        invalidate_user_permission_cache(instance.user_id, space_id=instance.space_id)
 
 
 @receiver(post_save, sender=UserSpace)
 def invalidate_permission_cache_on_userspace_save(sender, instance=None, **kwargs):
     if instance:
-        invalidate_user_permission_cache(instance.user_id)
+        invalidate_user_permission_cache(instance.user_id, space_id=instance.space_id)
 
 
 @receiver(m2m_changed, sender=UserSpace.groups.through)
 def invalidate_permission_cache_on_group_change(sender, instance=None, **kwargs):
-    if instance and hasattr(instance, 'user_id'):
-        invalidate_user_permission_cache(instance.user_id)
+    if instance and hasattr(instance, 'user_id') and hasattr(instance, 'space_id'):
+        invalidate_user_permission_cache(instance.user_id, space_id=instance.space_id)

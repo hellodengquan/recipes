@@ -2241,17 +2241,11 @@ class ShoppingListRecipeViewSet(LoggingMixin, viewsets.ModelViewSet):
 class ShoppingListViewSet(LoggingMixin, viewsets.ModelViewSet, DeleteRelationMixing):
     queryset = ShoppingList.objects
     serializer_class = ShoppingListSerializer
-    permission_classes = [(CustomIsOwner | CustomIsHousehold) & CustomTokenHasReadWriteScope]
+    permission_classes = [CustomIsUser & CustomTokenHasReadWriteScope]
     pagination_class = DefaultPagination
 
     def get_queryset(self):
-        household_user_ids = get_household_user_ids(self.request.user_space)
-        queryset = self.queryset.filter(
-            Q(shoppinglistentry__created_by=self.request.user) |
-            Q(shoppinglistentry__created_by__in=household_user_ids) |
-            Q(shoppinglistentry__list_recipe__created_by=self.request.user) |
-            Q(shoppinglistentry__list_recipe__created_by__in=household_user_ids)
-        ).filter(space=self.request.space).distinct().all()
+        queryset = self.queryset.filter(space=self.request.space).all()
         return queryset
 
 

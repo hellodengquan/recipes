@@ -23,9 +23,9 @@ PERMISSION_CACHE_VERSION_PREFIX = 'perm_cache_version_'
 PERMISSION_CACHE_TTL = 10
 
 
-def _get_permission_cache_version(user_id):
-    """Get the current permission cache version for a user."""
-    version_key = f'{PERMISSION_CACHE_VERSION_PREFIX}{user_id}'
+def _get_permission_cache_version(user_id, space_id):
+    """Get the current permission cache version for a user in a specific space."""
+    version_key = f'{PERMISSION_CACHE_VERSION_PREFIX}{space_id}_{user_id}'
     version = cache.get(version_key)
     if version is None:
         version = 1
@@ -33,14 +33,25 @@ def _get_permission_cache_version(user_id):
     return version
 
 
-def invalidate_user_permission_cache(user_id):
-    """Invalidate all permission caches for a given user by bumping the version number."""
+def invalidate_user_permission_cache(user_id, space_id=None):
+    """Invalidate permission caches for a given user.
+
+    If space_id is provided, only invalidate caches for that user+space.
+    If space_id is None, invalidate caches across ALL spaces for that user.
+    """
     if not user_id:
         return
-    version_key = f'{PERMISSION_CACHE_VERSION_PREFIX}{user_id}'
     try:
-        current_version = cache.get(version_key, 1)
-        cache.set(version_key, current_version + 1, timeout=None)
+        if space_id is not None:
+            version_key = f'{PERMISSION_CACHE_VERSION_PREFIX}{space_id}_{user_id}'
+            current_version = cache.get(version_key, 1)
+            cache.set(version_key, current_version + 1, timeout=None)
+        else:
+            from cookbook.models import UserSpace
+            for us in UserSpace.objects.filter(user_id=user_id).only('space_id'):
+                vk = f'{PERMISSION_CACHE_VERSION_PREFIX}{us.space_id}_{user_id}'
+                v = cache.get(vk, 1)
+                cache.set(vk, v + 1, timeout=None)
     except Exception:
         pass
 
@@ -74,21 +85,22 @@ def has_group_permission(user, groups, no_cache=False):
         return False
     groups_allowed = get_allowed_groups(groups)
 
-    cache_version = _get_permission_cache_version(user.pk)
-    CACHE_KEY = f'perm_{cache_version}_{inspect.stack()[0][3]}_{user.pk}_{hash(groups_allowed)}'
+    user_spaces = user.userspace_set.filter(active=True)
+    if len(user_spaces) != 1:
+        return False
+
+    user_space = user_spaces.first()
+    space_id = user_space.space_id
+
+    cache_version = _get_permission_cache_version(user.pk, space_id)
+    CACHE_KEY = f'perm_{cache_version}_{inspect.stack()[0][3]}_{space_id}_{user.pk}_{hash(groups_allowed)}'
 
     if not no_cache:
         cached_result = cache.get(CACHE_KEY, default=None)
         if cached_result is not None:
             return cached_result
 
-    result = False
-    if user.is_authenticated:
-        if user_space := user.userspace_set.filter(active=True):
-            if len(user_space) != 1:
-                result = False  # do not allow any group permission if more than one space is active, needs to be changed when simultaneous multi-space-tenancy is added
-            elif bool(user_space.first().groups.filter(name__in=groups_allowed)):
-                result = True
+    result = bool(user_space.groups.filter(name__in=groups_allowed))
 
     cache.set(CACHE_KEY, result, timeout=PERMISSION_CACHE_TTL)
     return result
