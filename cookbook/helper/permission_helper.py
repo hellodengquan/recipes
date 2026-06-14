@@ -1,10 +1,11 @@
 import inspect
+import threading
 
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import user_passes_test
 from django.contrib.auth.models import Group
-from django.core.cache import cache
+from django.core.cache import cache, caches
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.http import Http404, HttpResponseRedirect
 from django.urls import reverse, reverse_lazy
@@ -21,6 +22,64 @@ from cookbook.models import Recipe, ShareLink, UserSpace, Space
 
 PERMISSION_CACHE_VERSION_PREFIX = 'perm_cache_version_'
 PERMISSION_CACHE_TTL = 10
+PERMISSION_CACHE_LOCK_PREFIX = 'perm_cache_lock_'
+PERMISSION_CACHE_LOCK_TIMEOUT = 5
+
+_locmem_lock = threading.Lock()
+_audit_actor_local = threading.local()
+
+
+def _is_redis_backend():
+    """Check if the default cache backend is Redis (cross-worker shared)."""
+    try:
+        backend = settings.CACHES.get('default', {}).get('BACKEND', '')
+        return 'RedisCache' in backend or 'redis' in backend.lower()
+    except Exception:
+        return False
+
+
+def _atomic_incr_version(version_key):
+    """Atomically increment the permission cache version.
+
+    - Redis backend: uses native cache.incr() which is atomic
+    - LocMem backend: uses process-level threading.Lock to protect get+set
+    - Returns the new version number after increment
+    """
+    if _is_redis_backend():
+        try:
+            try:
+                new_version = cache.incr(version_key)
+                return new_version
+            except ValueError:
+                cache.add(version_key, 2, timeout=None)
+                return 2
+        except Exception:
+            pass
+
+    with _locmem_lock:
+        current = cache.get(version_key, 1)
+        new_version = current + 1
+        cache.set(version_key, new_version, timeout=None)
+        return new_version
+
+
+def set_audit_actor(actor_user):
+    """Set the current request's actor for permission audit logging.
+
+    Use this in API views before triggering a signal that creates an audit log.
+    The actor is stored in thread-local storage, so it only affects the current thread.
+    """
+    _audit_actor_local.user = actor_user
+
+
+def get_audit_actor():
+    """Get the current actor from thread-local storage, or None."""
+    return getattr(_audit_actor_local, 'user', None)
+
+
+def clear_audit_actor():
+    """Clear the thread-local actor."""
+    _audit_actor_local.user = None
 
 
 def _get_permission_cache_version(user_id, space_id):
@@ -38,20 +97,22 @@ def invalidate_user_permission_cache(user_id, space_id=None):
 
     If space_id is provided, only invalidate caches for that user+space.
     If space_id is None, invalidate caches across ALL spaces for that user.
+
+    Uses atomic increment to ensure cross-worker consistency:
+    - Redis: cache.incr() is atomic across all workers/processes
+    - LocMem: threading.Lock protects get+set within same process
     """
     if not user_id:
         return
     try:
         if space_id is not None:
             version_key = f'{PERMISSION_CACHE_VERSION_PREFIX}{space_id}_{user_id}'
-            current_version = cache.get(version_key, 1)
-            cache.set(version_key, current_version + 1, timeout=None)
+            _atomic_incr_version(version_key)
         else:
             from cookbook.models import UserSpace
             for us in UserSpace.objects.filter(user_id=user_id).only('space_id'):
                 vk = f'{PERMISSION_CACHE_VERSION_PREFIX}{us.space_id}_{user_id}'
-                v = cache.get(vk, 1)
-                cache.set(vk, v + 1, timeout=None)
+                _atomic_incr_version(vk)
     except Exception:
         pass
 
@@ -202,25 +263,45 @@ def invalidate_household_cache(user_space):
         cache.delete(f'household_user_ids_{user_space.space_id}_{user_space.household_id}')
 
 
-def share_link_valid(recipe, share):
+def share_link_valid(recipe, share, user=None):
     """
-    Verifies the validity of a share uuid
+    Verifies the validity of a share uuid.
+
+    If a user is provided and the user is authenticated, also verifies that
+    the user is still a member of the recipe's space. This prevents removed
+    members from accessing recipes via cached/stale share links.
+
     :param recipe: recipe object
     :param share: share uuid
-    :return: true if a share link with the given recipe and uuid exists
+    :param user: optional user object to verify membership
+    :return: true if a share link with the given recipe and uuid exists AND user has valid membership
     """
     try:
         CACHE_KEY = f'recipe_share_{recipe.pk}_{share}'
+        if user and user.is_authenticated:
+            CACHE_KEY = f'{CACHE_KEY}_{user.pk}'
         if c := cache.get(CACHE_KEY, False):
             return c
 
-        if link := ShareLink.objects.filter(recipe=recipe, uuid=share, abuse_blocked=False).first():
-            if 0 < settings.SHARING_LIMIT < link.request_count and not link.space.no_sharing_limit:
-                return False
-            link.request_count += 1
-            link.save()
-            cache.set(CACHE_KEY, True, timeout=3)
-            return True
+        with scopes_disabled():
+            if link := ShareLink.objects.filter(recipe=recipe, uuid=share, abuse_blocked=False).first():
+                if 0 < settings.SHARING_LIMIT < link.request_count and not link.space.no_sharing_limit:
+                    return False
+
+                if user and user.is_authenticated:
+                    is_member = UserSpace.objects.filter(
+                        user=user,
+                        space_id=link.space_id,
+                        active=True,
+                    ).exists()
+                    if not is_member:
+                        cache.set(CACHE_KEY, False, timeout=3)
+                        return False
+
+                link.request_count += 1
+                link.save()
+                cache.set(CACHE_KEY, True, timeout=3)
+                return True
         return False
     except ValidationError:
         return False
@@ -418,7 +499,7 @@ class CustomIsShare(permissions.BasePermission):
     def has_object_permission(self, request, view, obj):
         share = request.query_params.get('share', None)
         if share:
-            return share_link_valid(obj, share)
+            return share_link_valid(obj, share, request.user)
         return False
 
 
@@ -436,7 +517,7 @@ class CustomRecipePermission(permissions.BasePermission):
     def has_object_permission(self, request, view, obj):
         share = request.query_params.get('share', None)
         if share:
-            if share_link_valid(obj, share):
+            if share_link_valid(obj, share, request.user):
                 return True
             # Invalid share link - check if user has normal access
             # If not, raise 404 to avoid leaking recipe existence
@@ -619,3 +700,68 @@ def create_space_for_user(user, name=None):
         user_space.groups.add(Group.objects.filter(name='admin').get())
 
         return user_space
+
+
+# ---------------------------------------------------------------------------
+# Permission Audit Log
+# ---------------------------------------------------------------------------
+
+def log_permission_change(
+    action,
+    space_id,
+    target_user,
+    actor_user=None,
+    old_groups=None,
+    new_groups=None,
+    old_household_id=None,
+    new_household_id=None,
+    message='',
+):
+    """
+    Create a PermissionAuditLog entry.
+    Always runs outside of django-scopes context to ensure writability.
+
+    If actor_user is not provided, attempts to retrieve it from thread-local
+    storage (set via set_audit_actor()).
+
+    :param action: PermissionAuditLog.ACTION_* constant
+    :param space_id: ID of the space the permission change applies to
+    :param target_user: User object or user ID whose permissions changed
+    :param actor_user: Optional User object or user ID who performed the action
+    :param old_groups: Optional list of group names before change
+    :param new_groups: Optional list of group names after change
+    :param old_household_id: Optional household ID before change
+    :param new_household_id: Optional household ID after change
+    :param message: Optional additional information
+    """
+    from cookbook.models import PermissionAuditLog
+
+    with scopes_disabled():
+        try:
+            target_user_id = target_user.pk if hasattr(target_user, 'pk') else target_user
+            target_username = target_user.username if hasattr(target_user, 'username') else ''
+
+            if actor_user is None:
+                actor_user = get_audit_actor()
+
+            actor_user_id = None
+            actor_username = ''
+            if actor_user is not None:
+                actor_user_id = actor_user.pk if hasattr(actor_user, 'pk') else actor_user
+                actor_username = actor_user.username if hasattr(actor_user, 'username') else ''
+
+            PermissionAuditLog.objects.create(
+                action=action,
+                space_id=space_id,
+                target_user_id=target_user_id,
+                target_username=target_username,
+                actor_user_id=actor_user_id,
+                actor_username=actor_username,
+                old_groups=old_groups or [],
+                new_groups=new_groups or [],
+                old_household_id=old_household_id,
+                new_household_id=new_household_id,
+                message=message,
+            )
+        except Exception:
+            pass

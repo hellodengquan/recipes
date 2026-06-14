@@ -1745,3 +1745,48 @@ class CustomFilter(models.Model, PermissionModelMixin):
             models.UniqueConstraint(fields=['space', 'name'], name='cf_unique_name_per_space')
         ]
         ordering = ('pk',)
+
+
+class PermissionAuditLog(models.Model):
+    """
+    Audit log for permission changes (UserSpace create/delete/update, group changes).
+    Created outside of django-scopes context to ensure it's always writable,
+    even when the calling user no longer has access to the space.
+    """
+    ACTION_ADD = 'ADD'
+    ACTION_REMOVE = 'REMOVE'
+    ACTION_UPDATE = 'UPDATE'
+    ACTION_GROUP_CHANGE = 'GROUP_CHANGE'
+    ACTION_SELF_LEAVE = 'SELF_LEAVE'
+
+    ACTION_CHOICES = (
+        (ACTION_ADD, _('Member added')),
+        (ACTION_REMOVE, _('Member removed')),
+        (ACTION_UPDATE, _('Member updated')),
+        (ACTION_GROUP_CHANGE, _('Groups changed')),
+        (ACTION_SELF_LEAVE, _('Member left')),
+    )
+
+    action = models.CharField(max_length=32, choices=ACTION_CHOICES)
+    space_id = models.IntegerField(db_index=True)
+    target_user_id = models.IntegerField(db_index=True)
+    target_username = models.CharField(max_length=150, blank=True)
+    actor_user_id = models.IntegerField(null=True, blank=True, db_index=True)
+    actor_username = models.CharField(max_length=150, blank=True)
+    old_groups = models.JSONField(default=list, blank=True)
+    new_groups = models.JSONField(default=list, blank=True)
+    old_household_id = models.IntegerField(null=True, blank=True)
+    new_household_id = models.IntegerField(null=True, blank=True)
+    message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ('-created_at',)
+        indexes = [
+            models.Index(fields=['space_id', '-created_at']),
+            models.Index(fields=['target_user_id', '-created_at']),
+            models.Index(fields=['actor_user_id', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.created_at}: {self.action} user={self.target_username} space={self.space_id}'

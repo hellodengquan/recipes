@@ -82,7 +82,7 @@ from cookbook.helper.permission_helper import (CustomIsAdmin, CustomIsOwner, Cus
                                                above_space_limit,
                                                group_required, has_group_permission, is_space_owner,
                                                switch_user_active_space, CustomAiProviderPermission, IsCreateDRF, CustomIsOwnerDestroyOnly, CustomIsHousehold,
-                                               get_household_user_ids)
+                                               get_household_user_ids, set_audit_actor, clear_audit_actor)
 from cookbook.helper.recipe_search import RecipeSearch
 from cookbook.helper.recipe_url_import import clean_dict, get_from_youtube_scraper, get_images_from_soup
 from cookbook.helper.shopping_helper import RecipeShoppingEditor
@@ -737,7 +737,22 @@ class UserSpaceViewSet(LoggingMixin, viewsets.ModelViewSet):
         userspace = UserSpace.objects.get(pk=kwargs['pk'])
         if userspace.space.created_by == userspace.user:
             raise APIException('Cannot delete Space owner permission.')
-        return super().destroy(request, *args, **kwargs)
+
+        is_self_leave = userspace.user == request.user
+        try:
+            from cookbook.models import PermissionAuditLog
+            if is_self_leave:
+                userspace._audit_action = PermissionAuditLog.ACTION_SELF_LEAVE
+                userspace._audit_message = f'User {request.user.username} left space {userspace.space_id}'
+            else:
+                userspace._audit_action = PermissionAuditLog.ACTION_REMOVE
+                userspace._audit_message = f'User {request.user.username} removed {userspace.user.username} from space {userspace.space_id}'
+
+            set_audit_actor(request.user)
+            result = super().destroy(request, *args, **kwargs)
+            return result
+        finally:
+            clear_audit_actor()
 
     def get_queryset(self):
         internal_note = self.request.query_params.get('internal_note', None)

@@ -10,7 +10,7 @@ from django.utils import translation
 from django_scopes import scopes_disabled
 
 from cookbook.helper.cache_helper import CacheHelper
-from cookbook.helper.permission_helper import invalidate_user_permission_cache
+from cookbook.helper.permission_helper import invalidate_user_permission_cache, log_permission_change
 from cookbook.helper.unit_conversion_helper import UnitConversionHelper
 from cookbook.managers import DICTIONARY
 from cookbook.models import Food, PropertyType, Recipe, SearchFields, SearchPreference, Step, Unit, UserPreference, UserSpace
@@ -136,14 +136,28 @@ def clear_property_type_cache(sender, instance=None, created=False, **kwargs):
 
 @receiver(pre_save, sender=UserSpace)
 def capture_old_household(sender, instance=None, **kwargs):
-    """Stash the previous household_id so post_save can invalidate the old cache."""
+    """Stash the previous household_id and groups so post_save can log changes."""
     if instance and instance.pk:
         try:
-            instance._old_household_id = UserSpace.objects.filter(pk=instance.pk).values_list('household_id', flat=True).first()
+            from cookbook.models import PermissionAuditLog
+            with scopes_disabled():
+                old_instance = UserSpace.objects.filter(pk=instance.pk).first()
+                if old_instance:
+                    instance._old_household_id = old_instance.household_id
+                    instance._old_active = old_instance.active
+                    instance._old_groups = list(old_instance.groups.values_list('name', flat=True))
+                else:
+                    instance._old_household_id = None
+                    instance._old_active = None
+                    instance._old_groups = []
         except Exception:
             instance._old_household_id = None
+            instance._old_active = None
+            instance._old_groups = []
     else:
         instance._old_household_id = None
+        instance._old_active = None
+        instance._old_groups = []
 
 
 @receiver(post_save, sender=UserSpace)
@@ -161,6 +175,44 @@ def invalidate_household_cache_on_save(sender, instance=None, **kwargs):
     if not instance.household_id:
         caches['default'].delete(f'household_user_ids_{instance.space_id}_user_{instance.user_id}')
 
+    # Audit logging
+    try:
+        from cookbook.models import PermissionAuditLog
+        with scopes_disabled():
+            new_groups = list(instance.groups.values_list('name', flat=True))
+            old_groups = getattr(instance, '_old_groups', [])
+            created = kwargs.get('created', False)
+
+            if created:
+                action = PermissionAuditLog.ACTION_ADD
+                message = f'Member added to space {instance.space_id}'
+                old_hh = None
+                new_hh = instance.household_id
+            else:
+                old_hh = getattr(instance, '_old_household_id', None)
+                new_hh = instance.household_id
+                action = PermissionAuditLog.ACTION_UPDATE
+                changes = []
+                if old_hh != new_hh:
+                    changes.append(f'household: {old_hh} -> {new_hh}')
+                if changes:
+                    message = f'Member updated: {"; ".join(changes)}'
+                else:
+                    message = 'Member updated'
+
+            log_permission_change(
+                action=action,
+                space_id=instance.space_id,
+                target_user=instance.user,
+                old_groups=old_groups,
+                new_groups=new_groups,
+                old_household_id=old_hh,
+                new_household_id=new_hh,
+                message=message,
+            )
+    except Exception:
+        pass
+
 
 @receiver(post_delete, sender=UserSpace)
 def invalidate_household_cache_on_delete(sender, instance=None, **kwargs):
@@ -168,6 +220,27 @@ def invalidate_household_cache_on_delete(sender, instance=None, **kwargs):
         caches['default'].delete(f'household_user_ids_{instance.space_id}_{instance.household_id}')
     if instance:
         invalidate_user_permission_cache(instance.user_id, space_id=instance.space_id)
+
+    # Audit logging for removal
+    if instance:
+        try:
+            from cookbook.models import PermissionAuditLog
+            with scopes_disabled():
+                old_groups = list(instance.groups.values_list('name', flat=True))
+                action = getattr(instance, '_audit_action', PermissionAuditLog.ACTION_REMOVE)
+                message = getattr(instance, '_audit_message', f'Member removed from space {instance.space_id}')
+                log_permission_change(
+                    action=action,
+                    space_id=instance.space_id,
+                    target_user=instance.user,
+                    old_groups=old_groups,
+                    new_groups=[],
+                    old_household_id=instance.household_id,
+                    new_household_id=None,
+                    message=message,
+                )
+        except Exception:
+            pass
 
 
 @receiver(post_save, sender=UserSpace)
@@ -180,3 +253,38 @@ def invalidate_permission_cache_on_userspace_save(sender, instance=None, **kwarg
 def invalidate_permission_cache_on_group_change(sender, instance=None, **kwargs):
     if instance and hasattr(instance, 'user_id') and hasattr(instance, 'space_id'):
         invalidate_user_permission_cache(instance.user_id, space_id=instance.space_id)
+
+    # Capture old groups in pre_* phase, log in post_* phase
+    action = kwargs.get('action', '')
+    if instance and hasattr(instance, 'user_id') and hasattr(instance, 'space_id'):
+        try:
+            from cookbook.models import PermissionAuditLog
+
+            if action in ('pre_clear', 'pre_remove'):
+                with scopes_disabled():
+                    old_groups = list(instance.groups.values_list('name', flat=True))
+                    instance._audit_old_groups = old_groups
+
+            elif action in ('post_add', 'post_remove', 'post_clear'):
+                with scopes_disabled():
+                    new_groups = list(instance.groups.values_list('name', flat=True))
+                    old_groups = getattr(instance, '_audit_old_groups', None)
+                    if old_groups is None:
+                        old_groups = getattr(instance, '_old_groups', [])
+
+                    if old_groups != new_groups:
+                        message = f'Groups changed: {old_groups} -> {new_groups}'
+
+                        log_permission_change(
+                            action=PermissionAuditLog.ACTION_GROUP_CHANGE,
+                            space_id=instance.space_id,
+                            target_user=instance.user,
+                            old_groups=old_groups,
+                            new_groups=new_groups,
+                            message=message,
+                        )
+                # Clear the temp attribute to avoid stale data
+                if hasattr(instance, '_audit_old_groups'):
+                    delattr(instance, '_audit_old_groups')
+        except Exception:
+            pass

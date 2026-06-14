@@ -154,9 +154,10 @@ def no_perm(request):
 def recipe_pdf_viewer(request, pk):
     with scopes_disabled():
         recipe = get_object_or_404(Recipe, pk=pk)
-        if share_link_valid(recipe, request.GET.get('share', None)) or (has_group_permission(
+        share_uuid = request.GET.get('share', None)
+        if share_link_valid(recipe, share_uuid, request.user) or (has_group_permission(
                 request.user, ['guest']) and recipe.space == request.space):
-            return render(request, 'pdf_viewer.html', {'recipe_id': pk, 'share': request.GET.get('share', None)})
+            return render(request, 'pdf_viewer.html', {'recipe_id': pk, 'share': share_uuid})
         return HttpResponseRedirect(reverse('index'))
 
 
