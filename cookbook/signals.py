@@ -4,12 +4,13 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.postgres.search import SearchVector
 from django.core.cache import caches
-from django.db.models.signals import post_delete, post_save, pre_save
+from django.db.models.signals import m2m_changed, post_delete, post_save, pre_save
 from django.dispatch import receiver
 from django.utils import translation
 from django_scopes import scopes_disabled
 
 from cookbook.helper.cache_helper import CacheHelper
+from cookbook.helper.permission_helper import invalidate_user_permission_cache
 from cookbook.helper.unit_conversion_helper import UnitConversionHelper
 from cookbook.managers import DICTIONARY
 from cookbook.models import Food, PropertyType, Recipe, SearchFields, SearchPreference, Step, Unit, UserPreference, UserSpace
@@ -165,3 +166,17 @@ def invalidate_household_cache_on_save(sender, instance=None, **kwargs):
 def invalidate_household_cache_on_delete(sender, instance=None, **kwargs):
     if instance and instance.household_id:
         caches['default'].delete(f'household_user_ids_{instance.space_id}_{instance.household_id}')
+    if instance:
+        invalidate_user_permission_cache(instance.user_id)
+
+
+@receiver(post_save, sender=UserSpace)
+def invalidate_permission_cache_on_userspace_save(sender, instance=None, **kwargs):
+    if instance:
+        invalidate_user_permission_cache(instance.user_id)
+
+
+@receiver(m2m_changed, sender=UserSpace.groups.through)
+def invalidate_permission_cache_on_group_change(sender, instance=None, **kwargs):
+    if instance and hasattr(instance, 'user_id'):
+        invalidate_user_permission_cache(instance.user_id)

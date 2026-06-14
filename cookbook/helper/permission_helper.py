@@ -19,6 +19,32 @@ import random
 from cookbook.models import Recipe, ShareLink, UserSpace, Space
 
 
+PERMISSION_CACHE_VERSION_PREFIX = 'perm_cache_version_'
+PERMISSION_CACHE_TTL = 10
+
+
+def _get_permission_cache_version(user_id):
+    """Get the current permission cache version for a user."""
+    version_key = f'{PERMISSION_CACHE_VERSION_PREFIX}{user_id}'
+    version = cache.get(version_key)
+    if version is None:
+        version = 1
+        cache.set(version_key, version, timeout=None)
+    return version
+
+
+def invalidate_user_permission_cache(user_id):
+    """Invalidate all permission caches for a given user by bumping the version number."""
+    if not user_id:
+        return
+    version_key = f'{PERMISSION_CACHE_VERSION_PREFIX}{user_id}'
+    try:
+        current_version = cache.get(version_key, 1)
+        cache.set(version_key, current_version + 1, timeout=None)
+    except Exception:
+        pass
+
+
 def get_allowed_groups(groups_required):
     """
     Builds a list of all groups equal or higher to the provided groups
@@ -48,7 +74,9 @@ def has_group_permission(user, groups, no_cache=False):
         return False
     groups_allowed = get_allowed_groups(groups)
 
-    CACHE_KEY = hash((inspect.stack()[0][3], (user.pk, user.username, user.email), groups_allowed))
+    cache_version = _get_permission_cache_version(user.pk)
+    CACHE_KEY = f'perm_{cache_version}_{inspect.stack()[0][3]}_{user.pk}_{hash(groups_allowed)}'
+
     if not no_cache:
         cached_result = cache.get(CACHE_KEY, default=None)
         if cached_result is not None:
@@ -62,7 +90,7 @@ def has_group_permission(user, groups, no_cache=False):
             elif bool(user_space.first().groups.filter(name__in=groups_allowed)):
                 result = True
 
-    cache.set(CACHE_KEY, result, timeout=10)
+    cache.set(CACHE_KEY, result, timeout=PERMISSION_CACHE_TTL)
     return result
 
 

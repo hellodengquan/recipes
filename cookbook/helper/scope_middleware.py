@@ -62,6 +62,15 @@ class ScopeMiddleware:
                     user_space.active = True
                     user_space.save()
 
+            if user_space:
+                # Double-check that the user still has a valid UserSpace for this space
+                # This prevents stale permissions if the UserSpace was deleted but cache still exists
+                try:
+                    from cookbook.models import UserSpace
+                    user_space = UserSpace.objects.filter(pk=user_space.pk, user=request.user).first()
+                except Exception:
+                    user_space = None
+
             if not user_space:
                 if 'signup_token' in request.session:
                     # if user is authenticated, has no space but a signup token (InviteLink) is present, redirect to invite link logic
@@ -80,16 +89,24 @@ class ScopeMiddleware:
                 return self.get_response(request)
         else:
             if request.path.startswith(prefix + '/api/'):
-                try:
-                    if auth := OAuth2Authentication().authenticate(request):
-                        user_space = auth[0].userspace_set.filter(active=True).first()
-                        if user_space:
-                            request.space = user_space.space
-                            request.user_space = user_space
-                            with scope(space=request.space):
-                                return self.get_response(request)
-                except AuthenticationFailed:
-                    pass
+                with scopes_disabled():
+                    try:
+                        if auth := OAuth2Authentication().authenticate(request):
+                            user_space = auth[0].userspace_set.filter(active=True).first()
+                            if user_space:
+                                # Double-check that the user still has a valid UserSpace for this space
+                                try:
+                                    from cookbook.models import UserSpace
+                                    user_space = UserSpace.objects.filter(pk=user_space.pk, user=auth[0]).first()
+                                except Exception:
+                                    user_space = None
+                            if user_space:
+                                request.space = user_space.space
+                                request.user_space = user_space
+                                with scope(space=request.space):
+                                    return self.get_response(request)
+                    except AuthenticationFailed:
+                        pass
 
             with scopes_disabled():
                 request.space = None
