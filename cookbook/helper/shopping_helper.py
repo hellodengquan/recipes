@@ -6,6 +6,7 @@ from django.db.models.functions import Coalesce
 from django.utils.translation import gettext as _
 
 from cookbook.connectors.connector_manager import ActionType, ConnectorManager
+from cookbook.helper.ingredient_normalization_service import IngredientNormalizationService
 from cookbook.helper.permission_helper import get_household_user_ids
 from cookbook.models import Ingredient, MealPlan, Recipe, ShoppingListEntry, ShoppingListRecipe, SupermarketCategoryRelation
 
@@ -59,6 +60,16 @@ class RecipeShoppingEditor():
             self.servings = float(self._kwargs.get('servings', None))
         except (ValueError, TypeError):
             self.servings = getattr(self._shopping_list_recipe, 'servings', None) or getattr(self.mealplan, 'servings', None) or getattr(self.recipe, 'servings', None)
+
+        self._normalization_service = None
+
+    @property
+    def normalization_service(self):
+        if self._normalization_service is None:
+            self._normalization_service = IngredientNormalizationService(
+                space=self.space,
+            )
+        return self._normalization_service
 
     @property
     def _recipe_servings(self):
@@ -157,11 +168,48 @@ class RecipeShoppingEditor():
             return True
 
         for sle in ShoppingListEntry.objects.filter(list_recipe=self._shopping_list_recipe):
-            if sle.ingredient: # TODO temporarily dont scale manual entries until ingredient_amount or some other base amount has been migrated to SLE
-                sle.amount = sle.ingredient.amount * Decimal(self._servings_factor)
+            if sle.ingredient:
+                normalized = self.normalization_service.scale_by_servings(
+                    sle.ingredient,
+                    self._shopping_list_recipe.servings,
+                    self.servings
+                )
+                sle.amount = normalized.amount
                 sle.save()
         self._shopping_list_recipe.servings = self.servings
         self._shopping_list_recipe.save()
+        return True
+
+    def merge_entries(self):
+        """
+        Merge shopping list entries with the same food and unit by summing their amounts.
+        Uses the normalization service's merge_ingredients functionality.
+        """
+        entries = ShoppingListEntry.objects.filter(list_recipe=self._shopping_list_recipe).select_related('food', 'unit', 'ingredient')
+
+        ingredients = []
+        entry_map = {}
+        for entry in entries:
+            if entry.food:
+                key = (entry.food.id, entry.unit.id if entry.unit else None)
+                if key not in entry_map:
+                    entry_map[key] = []
+                entry_map[key].append(entry)
+                ingredients.append(entry)
+
+        merged = self.normalization_service.merge_ingredients(ingredients)
+
+        for norm in merged:
+            key = (norm.food.id, norm.unit.id if norm.unit else None)
+            if key in entry_map and len(entry_map[key]) > 1:
+                primary = entry_map[key][0]
+                primary.amount = norm.amount
+                if norm.note:
+                    primary.note = (primary.note or '') + norm.note if primary.note else norm.note
+                primary.save()
+                for entry in entry_map[key][1:]:
+                    entry.delete()
+
         return True
 
     def delete(self, **kwargs):

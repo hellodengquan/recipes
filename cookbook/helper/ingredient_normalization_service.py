@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Optional, Tuple, Union
 
+from django.conf import settings
 from django.db.models import Q
 
 from cookbook.helper.automation_helper import AutomationEngine
@@ -29,17 +30,41 @@ class IngredientNormalizationService:
     automation = None
     unit_conversion = None
     ignore_automations = False
+    use_cache = True
+    amount_decimal_places = 4
+    max_food_name_length = 128
+    max_note_length = 256
+    merge_notes = True
+    auto_unit_conversion = False
+    preferred_units = []
+    enable_multilingual = True
 
-    AMOUNT_DECIMAL_PLACES = 4
-    MAX_AMOUNT_DIGITS = 32
-
-    def __init__(self, request=None, space=None, use_cache=True, ignore_automations=False):
+    def __init__(self, request=None, space=None, use_cache=None, ignore_automations=None):
         self.request = request
         self.space = space or getattr(request, 'space', None)
-        self.ignore_automations = ignore_automations
+
+        self.use_cache = use_cache if use_cache is not None else getattr(
+            settings, 'INGREDIENT_NORMALIZATION_USE_CACHE', True)
+        self.ignore_automations = ignore_automations if ignore_automations is not None else not getattr(
+            settings, 'INGREDIENT_NORMALIZATION_ENABLE_AUTOMATIONS', True)
+
+        self.amount_decimal_places = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_AMOUNT_DECIMAL_PLACES', 4)
+        self.max_food_name_length = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_MAX_FOOD_NAME_LENGTH', 128)
+        self.max_note_length = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_MAX_NOTE_LENGTH', 256)
+        self.merge_notes = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_MERGE_NOTES', True)
+        self.auto_unit_conversion = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_AUTO_UNIT_CONVERSION', False)
+        self.preferred_units = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_PREFERRED_UNITS', [])
+        self.enable_multilingual = getattr(
+            settings, 'INGREDIENT_NORMALIZATION_ENABLE_MULTILINGUAL', True)
 
         if not self.ignore_automations and self.request:
-            self.automation = AutomationEngine(self.request, use_cache=use_cache)
+            self.automation = AutomationEngine(self.request, use_cache=self.use_cache)
 
         if self.space:
             self.unit_conversion = UnitConversionHelper(self.space)
@@ -130,7 +155,7 @@ class IngredientNormalizationService:
         else:
             return Decimal('0')
 
-        quantize_str = '0.' + '0' * self.AMOUNT_DECIMAL_PLACES
+        quantize_str = '0.' + '0' * self.amount_decimal_places
         d = d.quantize(Decimal(quantize_str), rounding=ROUND_HALF_UP)
 
         if d == d.to_integral_value():
@@ -211,13 +236,20 @@ class IngredientNormalizationService:
         note = ''
         start = 0
 
-        while start < len(tokens) and not tokens[start].endswith((',', ';', ':')):
+        end_punctuations = (',', ';', ':', '，', '；', '：')
+
+        while start < len(tokens) and not any(tokens[start].endswith(p) for p in end_punctuations):
             start += 1
 
         if start == len(tokens):
             food = ' '.join(tokens)
         else:
-            food = ' '.join(tokens[:start + 1])[:-1]
+            last_token = tokens[start]
+            for p in end_punctuations:
+                if last_token.endswith(p):
+                    last_token = last_token[:-len(p)]
+                    break
+            food = ' '.join(tokens[:start] + [last_token])
             note = ' '.join(tokens[start + 1:])
 
         return food, note
@@ -226,12 +258,33 @@ class IngredientNormalizationService:
         food = ''
         note = ''
 
-        if tokens[-1].endswith(')'):
-            if not tokens[-1].startswith('(') and '(' in tokens[-1]:
-                return self.parse_food_with_comma(tokens)
+        bracket_pairs = [('(', ')'), ('（', '）')]
+
+        last_token = tokens[-1]
+        found_close = None
+        found_open = None
+
+        for open_b, close_b in bracket_pairs:
+            if last_token.endswith(close_b):
+                found_close = close_b
+                found_open = open_b
+                break
+
+        if found_close:
+            if not last_token.startswith(found_open) and found_open in last_token:
+                idx = last_token.rfind(found_open)
+                food_part = last_token[:idx]
+                note_part = last_token[idx + len(found_open):-len(found_close)]
+
+                if len(tokens) > 1:
+                    food = ' '.join(tokens[:-1]) + ' ' + food_part
+                else:
+                    food = food_part
+                note = note_part
+                return food.strip(), note.strip()
 
             start = len(tokens) - 1
-            while not tokens[start].startswith('(') and not start == 0:
+            while not tokens[start].startswith(found_open) and not start == 0:
                 start -= 1
 
             if start == 0:
@@ -239,7 +292,8 @@ class IngredientNormalizationService:
             elif start < 0:
                 food, note = self.parse_food_with_comma(tokens)
             else:
-                note = ' '.join(tokens[start:])[1:-1]
+                note_text = ' '.join(tokens[start:])
+                note = note_text[len(found_open):-len(found_close)]
                 food = ' '.join(tokens[:start])
         else:
             food, note = self.parse_food_with_comma(tokens)
@@ -331,7 +385,10 @@ class IngredientNormalizationService:
                             else:
                                 food, note = self.parse_food(tokens[1:])
                 else:
-                    food = tokens[1]
+                    try:
+                        food, note = self.parse_food([tokens[1]])
+                    except ValueError:
+                        food = tokens[1]
             except ValueError:
                 try:
                     food, note = self.parse_food(tokens)
@@ -347,13 +404,13 @@ class IngredientNormalizationService:
         if food and not self.ignore_automations and self.automation:
             food = self.automation.apply_food_automation(food)
 
-        if len(food) > 128:
-            if len(food.split()) > 1 and len(food.split()[0]) < 128:
+        if len(food) > self.max_food_name_length:
+            if len(food.split()) > 1 and len(food.split()[0]) < self.max_food_name_length:
                 note = ' '.join(food.split()[1:]) + ' ' + note
                 food = food.split()[0]
             else:
                 note = food + ' ' + note
-                food = food[:128]
+                food = food[:self.max_food_name_length]
 
         if len(food.strip()) == 0:
             raise ValueError(f'Error parsing string {ingredient}, food cannot be empty')
@@ -602,6 +659,46 @@ class IngredientNormalizationService:
         )
 
         return ingredient
+
+    def parse_as_ingredient(self, text: str) -> Ingredient:
+        """
+        Parse ingredient string into ingredient object with nested food information.
+        Backward compatible with IngredientParser.parse_as_ingredient().
+        :param text: ingredient string
+        :return: Ingredient object
+        """
+        normalized = self.normalize(text)
+        if not normalized.original_text:
+            normalized.original_text = text
+        return self.to_ingredient(normalized)
+
+    def parse(self, text: str) -> Tuple[Decimal, Optional[str], str, str]:
+        """
+        Parse ingredient string and return tuple of (amount, unit, food, note).
+        Backward compatible with IngredientParser.parse().
+        :param text: ingredient string
+        :return: tuple (amount, unit, food, note)
+        """
+        normalized = self.normalize(text)
+        return normalized.amount, normalized.unit_name or None, normalized.food_name, normalized.note
+
+    def get_food(self, food_name: str) -> Optional[Food]:
+        """
+        Get or create food by name.
+        Backward compatible with IngredientParser.get_food().
+        :param food_name: food name
+        :return: Food object or None
+        """
+        return self.get_or_create_food(food_name)
+
+    def get_unit(self, unit_name: str) -> Optional[Unit]:
+        """
+        Get or create unit by name.
+        Backward compatible with IngredientParser.get_unit().
+        :param unit_name: unit name
+        :return: Unit object or None
+        """
+        return self.get_or_create_unit(unit_name)
 
     def normalize_to_ingredient(self, ingredient_input: Union[str, dict], space=None) -> Ingredient:
         normalized = self.normalize(ingredient_input)

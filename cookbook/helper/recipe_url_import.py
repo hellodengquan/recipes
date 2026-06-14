@@ -10,7 +10,7 @@ from pytubefix import YouTube
 from recipe_scrapers._utils import get_host_name, get_minutes
 
 from cookbook.helper.automation_helper import AutomationEngine
-from cookbook.helper.ingredient_parser import IngredientParser
+from cookbook.helper.ingredient_normalization_service import IngredientNormalizationService
 from cookbook.models import Automation, Keyword, PropertyType
 
 
@@ -144,7 +144,7 @@ def get_from_scraper(scrape, request):
     except AttributeError:
         recipe_json['keywords'] = keywords
 
-    ingredient_parser = IngredientParser(request, True)
+    ingredient_normalization = IngredientNormalizationService(request, request.space)
 
     # assign steps
     try:
@@ -170,19 +170,19 @@ def get_from_scraper(scrape, request):
         for x in scrape.ingredients():
             if x.strip() != '':
                 try:
-                    amount, unit, food, note = ingredient_parser.parse(x)
+                    normalized = ingredient_normalization.normalize(x)
                     ingredient = {
-                        'amount': amount,
+                        'amount': normalized.amount,
                         'food': {
-                            'name': food,
+                            'name': normalized.food_name,
                         },
                         'unit': None,
-                        'note': note,
+                        'note': normalized.note,
                         'original_text': x
                     }
-                    if unit:
+                    if normalized.unit_name:
                         ingredient['unit'] = {
-                            'name': unit,
+                            'name': normalized.unit_name,
                         }
                     recipe_json['steps'][0]['ingredients'].append(ingredient)
                 except Exception:

@@ -73,7 +73,7 @@ from cookbook.helper.HelperFunctions import str2bool, safe_request
 from cookbook.helper.ai_helper import can_perform_ai_request, AiCallbackHandler
 from cookbook.helper.batch_edit_helper import add_to_relation, remove_from_relation, remove_all_from_relation, set_relation
 from cookbook.helper.image_processing import handle_image
-from cookbook.helper.ingredient_parser import IngredientParser
+from cookbook.helper.ingredient_normalization_service import IngredientNormalizationService
 from cookbook.helper.open_data_importer import OpenDataImporter
 from cookbook.helper.permission_helper import (CustomIsAdmin, CustomIsOwner, CustomIsOwnerReadOnly, CustomIsShared,
                                                CustomIsSpaceOwner, CustomIsUser, CustomIsGuest,
@@ -3253,15 +3253,15 @@ class IngredientParserView(viewsets.GenericViewSet):
         serializer = IngredientParserRequestSerializer(data=request.data, partial=True)
         if serializer.is_valid():
             response_obj = {'ingredient': None, 'ingredients': []}
-            ingredient_parser = IngredientParser(request, False)
+            normalization_service = IngredientNormalizationService(request, request.space)
 
             if 'ingredient' in serializer.validated_data and serializer.validated_data['ingredient'].strip():
-                response_obj['ingredient'] = ingredient_parser.parse_as_ingredient(serializer.validated_data['ingredient'])
+                response_obj['ingredient'] = normalization_service.parse_as_ingredient(serializer.validated_data['ingredient'])
 
             if 'ingredients' in serializer.validated_data:
                 for ing in serializer.validated_data['ingredients']:
                     if ing.strip():
-                        response_obj['ingredients'].append(ingredient_parser.parse_as_ingredient(ing))
+                        response_obj['ingredients'].append(normalization_service.parse_as_ingredient(ing))
 
             return Response(IngredientParserResponseSerializer(context={'request': request}).to_representation(response_obj))
 
@@ -3279,8 +3279,8 @@ class IngredientParserView(viewsets.GenericViewSet):
 def ingredient_from_string(request):
     text = request.data['text']
 
-    ingredient_parser = IngredientParser(request, False)
-    ingredient = ingredient_parser.parse_as_ingredient(text)
+    normalization_service = IngredientNormalizationService(request, request.space)
+    ingredient = normalization_service.parse_as_ingredient(text)
 
     return JsonResponse(ingredient, status=200)
 

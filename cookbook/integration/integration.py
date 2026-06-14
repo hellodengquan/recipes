@@ -16,6 +16,7 @@ from django_scopes import scope
 from lxml import etree
 
 from cookbook.helper.image_processing import handle_image
+from cookbook.helper.ingredient_normalization_service import IngredientNormalizationService
 from cookbook.models import Keyword, Recipe
 from recipes.settings import DEBUG, EXPORT_FILE_CACHE_DURATION, MAX_ZIP_FILE_COUNT, MAX_ZIP_FILE_SIZE, MAX_ZIP_NESTING_DEPTH, MAX_ZIP_TOTAL_SIZE
 
@@ -32,6 +33,8 @@ class Integration:
     import_meal_plans = True
     import_shopping_lists = True
     nutrition_per_serving = False
+
+    _normalization_service = None
 
     def __init__(self, request, export_type):
         """
@@ -55,6 +58,35 @@ class Integration:
             self.keyword = parent.add_child(name=name, description=description, space=request.space)
         except (IntegrityError, ValueError):  # in case, for whatever reason, the name does exist append UUID to it. Not nice but works for now.
             self.keyword = parent.add_child(name=f'{name} {str(uuid.uuid4())[0:8]}', description=description, space=request.space)
+
+    @property
+    def normalization_service(self):
+        if self._normalization_service is None:
+            self._normalization_service = IngredientNormalizationService(
+                request=self.request,
+                space=self.request.space,
+            )
+        return self._normalization_service
+
+    def parse_ingredient(self, ingredient_text):
+        """
+        Parse an ingredient string using the normalization service
+        :param ingredient_text: ingredient string to parse
+        :return: NormalizedIngredient object
+        """
+        return self.normalization_service.normalize(ingredient_text)
+
+    def create_ingredient(self, ingredient_text, original_text=None):
+        """
+        Create an Ingredient object from an ingredient string using the normalization service
+        :param ingredient_text: ingredient string
+        :param original_text: original text (defaults to ingredient_text)
+        :return: Ingredient object
+        """
+        normalized = self.normalization_service.normalize(ingredient_text)
+        if original_text:
+            normalized.original_text = original_text
+        return self.normalization_service.to_ingredient(normalized)
 
     def get_zip_file(self, file):
         """
