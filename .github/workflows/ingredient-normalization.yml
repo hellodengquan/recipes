@@ -1,0 +1,152 @@
+name: Ingredient Normalization Docker & Import Regression
+
+on:
+  push:
+    paths:
+      - 'cookbook/helper/ingredient_normalization_service.py'
+      - 'cookbook/integration/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+  pull_request:
+    paths:
+      - 'cookbook/helper/ingredient_normalization_service.py'
+      - 'cookbook/integration/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+  workflow_dispatch:
+
+jobs:
+  import-regression:
+    name: Import No-Regression Test
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'TandoorRecipes'
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify no top-level jieba/mecab imports
+        run: |
+          python -c "
+          import ast, sys, os
+          errors = []
+          for root, dirs, files in os.walk('cookbook'):
+              for f in files:
+                  if not f.endswith('.py'):
+                      continue
+                  path = os.path.join(root, f)
+                  try:
+                      with open(path) as fh:
+                          tree = ast.parse(fh.read())
+                      for node in ast.walk(tree):
+                          if isinstance(node, ast.Import):
+                              for alias in node.names:
+                                  if alias.name in ('jieba', 'MeCab', 'mecab'):
+                                      errors.append(f'{path}:{node.lineno} - top-level import of {alias.name}')
+                          elif isinstance(node, ast.ImportFrom):
+                              if node.module and node.module.split('.')[0] in ('jieba', 'MeCab', 'mecab'):
+                                  if node.col_offset > 0:
+                                      continue
+                                  errors.append(f'{path}:{node.lineno} - top-level from-import of {node.module}')
+                  except SyntaxError:
+                      pass
+          if errors:
+              for e in errors:
+                  print(f'ERROR: {e}', file=sys.stderr)
+              sys.exit(1)
+          print('OK: No top-level jieba/MeCab imports found in cookbook/')
+          "
+
+      - name: Verify lazy import safety
+        run: |
+          python -c "
+          from cookbook.helper.ingredient_normalization_service import IngredientNormalizationService
+          svc = IngredientNormalizationService(ignore_automations=True)
+          assert not svc.is_chinese_nlp_available(), 'jieba should NOT be available without explicit install'
+          assert not svc.is_japanese_nlp_available(), 'MeCab should NOT be available without explicit install'
+          print('OK: NLP lazy import safety verified - no ImportError without jieba/mecab')
+          "
+
+      - name: Verify all integrations use new service
+        run: |
+          python -c "
+          import os, re, sys
+          errors = []
+          int_dir = 'cookbook/integration'
+          for f in os.listdir(int_dir):
+              if not f.endswith('.py') or f == '__init__.py':
+                  continue
+              path = os.path.join(int_dir, f)
+              with open(path) as fh:
+                  content = fh.read()
+              if 'from cookbook.helper.ingredient_parser import IngredientParser' in content:
+                  errors.append(f'{path}: still imports IngredientParser')
+              if re.search(r'ingredient_parser\s*=\s*IngredientParser', content):
+                  errors.append(f'{path}: still creates IngredientParser instance')
+          if errors:
+              for e in errors:
+                  print(f'ERROR: {e}', file=sys.stderr)
+              sys.exit(1)
+          print('OK: All integration modules use IngredientNormalizationService')
+          "
+
+  docker-build-regression:
+    name: Docker Build Regression
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'TandoorRecipes'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build default Docker image (no NLP)
+        run: |
+          docker build -t tandoor-test-default . 2>&1 | tail -20
+
+      - name: Verify default image starts without jieba/mecab ImportError
+        run: |
+          docker run --rm tandoor-test-default /opt/recipes/venv/bin/python -c "
+          from cookbook.helper.ingredient_normalization_service import IngredientNormalizationService
+          svc = IngredientNormalizationService(ignore_automations=True)
+          assert not svc.is_chinese_nlp_available(), 'jieba should not be in default image'
+          assert not svc.is_japanese_nlp_available(), 'MeCab should not be in default image'
+          print('OK: Default image - no ImportError, NLP backends correctly unavailable')
+          "
+
+      - name: Build Docker image with Chinese NLP (jieba)
+        run: |
+          docker build --build-arg ENABLE_CHINESE_NLP=1 -t tandoor-test-zh . 2>&1 | tail -20
+
+      - name: Verify Chinese NLP image has jieba available
+        run: |
+          docker run --rm tandoor-test-zh /opt/recipes/venv/bin/python -c "
+          import jieba
+          from cookbook.helper.ingredient_normalization_service import IngredientNormalizationService
+          svc = IngredientNormalizationService(ignore_automations=True)
+          assert svc.is_chinese_nlp_available(), 'jieba should be available in Chinese NLP image'
+          print('OK: Chinese NLP image - jieba available and detected')
+          "
+
+      - name: Build Docker image with all NLP
+        run: |
+          docker build --build-arg ENABLE_MULTILANG_NLP=1 -t tandoor-test-multilang . 2>&1 | tail -20
+
+      - name: Verify multilang NLP image
+        run: |
+          docker run --rm tandoor-test-multilang /opt/recipes/venv/bin/python -c "
+          from cookbook.helper.ingredient_normalization_service import IngredientNormalizationService
+          svc = IngredientNormalizationService(ignore_automations=True)
+          print(f'Chinese NLP: {svc.is_chinese_nlp_available()}')
+          print(f'Japanese NLP: {svc.is_japanese_nlp_available()}')
+          print('OK: Multilang NLP image verified')
+          "

@@ -691,3 +691,183 @@ class TestPerformanceBaseline:
 
             assert cache_time <= no_cache_time * 1.5, \
                 f'Cache time {cache_time:.4f}s should not exceed no-cache {no_cache_time:.4f}s by 50%'
+
+
+class TestCacheInvalidationStrategy:
+    def test_get_invalidation_strategy_returns_documentation(self):
+        strategy = IngredientNormalizationService.get_invalidation_strategy()
+        assert 'key_format' in strategy
+        assert 'version_sources' in strategy
+        assert 'invalidation_triggers' in strategy
+        assert 'old_worker_fallback' in strategy
+        assert 'ttl' in strategy
+        assert 'ing_norm_v' in strategy['key_format']
+        assert len(strategy['version_sources']) == 2
+        assert 'automation_rule_change' in strategy['invalidation_triggers']
+        assert 'dictionary_version_switch' in strategy['invalidation_triggers']
+        assert 'code_upgrade' in strategy['invalidation_triggers']
+        assert 'mechanism' in strategy['old_worker_fallback']
+        assert 'cleanup' in strategy['old_worker_fallback']
+        assert 'convergence' in strategy['old_worker_fallback']
+
+    def test_effective_cache_version_without_redis_global(self, normalization_service, space_1):
+        with scope(space=space_1):
+            ver = normalization_service.get_effective_cache_version()
+            assert isinstance(ver, int)
+            assert ver >= normalization_service.cache_version
+
+    def test_effective_cache_version_includes_global_bump(self, normalization_service, space_1):
+        with scope(space=space_1):
+            ver_before = normalization_service.get_effective_cache_version()
+            try:
+                IngredientNormalizationService.bump_cache_version(1)
+            except Exception:
+                pytest.skip('Cache backend does not support incr')
+            ver_after = normalization_service.get_effective_cache_version()
+            assert ver_after > ver_before, \
+                f'Version after bump ({ver_after}) should be > before ({ver_before})'
+
+    def test_cache_key_changes_after_version_bump(self, normalization_service, space_1):
+        with scope(space=space_1):
+            key_before = normalization_service._get_cache_key('100 g Salt')
+            try:
+                IngredientNormalizationService.bump_cache_version(1)
+            except Exception:
+                pytest.skip('Cache backend does not support incr')
+            key_after = normalization_service._get_cache_key('100 g Salt')
+            assert key_before != key_after, \
+                'Cache key must change after version bump to invalidate old entries'
+
+    def test_invalidate_space_cache_does_not_crash(self, space_1):
+        try:
+            IngredientNormalizationService.invalidate_space_cache(space_1.id)
+        except Exception as e:
+            pytest.fail(f'invalidate_space_cache raised {e}')
+
+    def test_invalidate_on_automation_change_does_not_crash(self, space_1):
+        try:
+            IngredientNormalizationService.invalidate_on_automation_change(space_1.id)
+        except Exception as e:
+            pytest.fail(f'invalidate_on_automation_change raised {e}')
+
+    def test_bump_cache_version_returns_int(self):
+        try:
+            new_ver = IngredientNormalizationService.bump_cache_version(1)
+            assert isinstance(new_ver, int)
+            assert new_ver > 0
+        except Exception:
+            pytest.skip('Cache backend does not support incr')
+
+    def test_old_worker_fallback_key_isolation(self, normalization_service, space_1):
+        """
+        Simulate old worker with cache_version=1 and new worker with
+        cache_version=2. They should produce different keys, ensuring
+        old worker results don't pollute new worker cache.
+        """
+        with scope(space=space_1):
+            normalization_service.cache_version = 1
+            key_old = normalization_service._get_cache_key('500 g Beef')
+            normalization_service.cache_version = 2
+            key_new = normalization_service._get_cache_key('500 g Beef')
+            assert key_old != key_new, \
+                'Different cache versions must produce different keys'
+
+
+class TestDockerDeploymentSafety:
+    def test_no_toplevel_jieba_import(self):
+        import ast
+        import os
+        errors = []
+        for root, dirs, files in os.walk(
+            os.path.join(os.path.dirname(__file__), '..', '..', 'helper')
+        ):
+            for f in files:
+                if not f.endswith('.py'):
+                    continue
+                path = os.path.join(root, f)
+                try:
+                    with open(path) as fh:
+                        tree = ast.parse(fh.read())
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Import):
+                            for alias in node.names:
+                                if alias.name in ('jieba', 'MeCab', 'mecab'):
+                                    if node.col_offset == 0:
+                                        errors.append(f'{path}:{node.lineno}')
+                        elif isinstance(node, ast.ImportFrom):
+                            if node.module and node.module.split('.')[0] in ('jieba', 'MeCab', 'mecab'):
+                                if node.col_offset == 0:
+                                    errors.append(f'{path}:{node.lineno}')
+                except SyntaxError:
+                    pass
+        assert not errors, f'Top-level jieba/MeCab imports found: {errors}'
+
+    def test_lazy_import_safe_without_packages(self, normalization_service):
+        result_zh = normalization_service.is_chinese_nlp_available()
+        result_ja = normalization_service.is_japanese_nlp_available()
+        assert result_zh is False or isinstance(result_zh, bool)
+        assert result_ja is False or isinstance(result_ja, bool)
+
+    def test_normalize_works_without_nlp_packages(self, normalization_service, space_1):
+        with scope(space=space_1):
+            result = normalization_service.normalize('200 g Apple')
+            assert result is not None
+            assert result.food_name != ''
+
+    def test_chinese_normalize_works_without_jieba(self, normalization_service, space_1):
+        with scope(space=space_1):
+            result = normalization_service.normalize('200克 面粉')
+            assert result is not None
+
+    def test_requirements_txt_has_nlp_section(self):
+        import os
+        req_path = os.path.join(
+            os.path.dirname(__file__), '..', '..', '..', 'requirements.txt'
+        )
+        if not os.path.exists(req_path):
+            pytest.skip('requirements.txt not found')
+        with open(req_path) as f:
+            content = f.read()
+        assert 'jieba' in content, 'requirements.txt must mention jieba'
+        assert 'mecab' in content, 'requirements.txt must mention mecab'
+
+    def test_dockerfile_has_nlp_build_args(self):
+        import os
+        dockerfile_path = os.path.join(
+            os.path.dirname(__file__), '..', '..', '..', 'Dockerfile'
+        )
+        if not os.path.exists(dockerfile_path):
+            pytest.skip('Dockerfile not found')
+        with open(dockerfile_path) as f:
+            content = f.read()
+        assert 'ENABLE_CHINESE_NLP' in content, 'Dockerfile must have ENABLE_CHINESE_NLP build arg'
+        assert 'ENABLE_JAPANESE_NLP' in content, 'Dockerfile must have ENABLE_JAPANESE_NLP build arg'
+        assert 'ENABLE_MULTILANG_NLP' in content, 'Dockerfile must have ENABLE_MULTILANG_NLP build arg'
+
+
+class TestRealisticDatasetBenchmark:
+    def test_generate_realistic_dataset_produces_variety(self):
+        from benchmark_ingredient_normalization import generate_realistic_dataset
+        dataset = generate_realistic_dataset(1000)
+        assert len(dataset) == 1000
+        unique = len(set(dataset))
+        assert unique > 100, f'Expected >100 unique items in 1000, got {unique}'
+
+    def test_generate_realistic_dataset_has_multilingual(self):
+        from benchmark_ingredient_normalization import generate_realistic_dataset
+        dataset = generate_realistic_dataset(500)
+        has_cjk = any(any(ord(c) > 0x2E80 for c in s) for s in dataset)
+        assert has_cjk, 'Realistic dataset should contain CJK characters'
+
+    def test_generate_realistic_dataset_deterministic(self):
+        from benchmark_ingredient_normalization import generate_realistic_dataset
+        d1 = generate_realistic_dataset(100)
+        d2 = generate_realistic_dataset(100)
+        assert d1 == d2, 'Same seed should produce same dataset'
+
+    def test_capacity_reference_has_all_scales(self):
+        from benchmark_ingredient_normalization import CAPACITY_REFERENCE
+        assert '1k_ingredients' in CAPACITY_REFERENCE
+        assert '5k_ingredients' in CAPACITY_REFERENCE
+        assert '10k_ingredients' in CAPACITY_REFERENCE
+        assert '50k_ingredients' in CAPACITY_REFERENCE

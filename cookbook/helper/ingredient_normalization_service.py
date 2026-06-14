@@ -237,11 +237,34 @@ class IngredientNormalizationService:
         except Exception:
             return None
 
+    def get_effective_cache_version(self) -> int:
+        """
+        Get the effective cache version by combining the settings version
+        with the Redis global version. This ensures:
+        - When a new worker starts with a different CACHE_VERSION setting,
+          its cache keys differ from old workers (graceful upgrade).
+        - When bump_cache_version() is called (e.g. after automation change),
+          all workers immediately see the new version via Redis.
+        - Old workers with stale code naturally miss cache and recompute.
+        """
+        base_ver = self.cache_version
+        cache = self._get_cache()
+        if not cache:
+            return base_ver
+        try:
+            global_ver = cache.get(f'{self.CACHE_KEY_PREFIX}_global_version')
+            if global_ver is not None:
+                return base_ver + int(global_ver)
+        except Exception:
+            pass
+        return base_ver
+
     def _get_cache_key(self, ingredient_text: str) -> Optional[str]:
         if not self.space:
             return None
         hashed = hashlib.sha256(ingredient_text.encode('utf-8')).hexdigest()
-        return f'{self.CACHE_KEY_PREFIX}{self.cache_version}_sp{self.space.id}_{hashed}'
+        ver = self.get_effective_cache_version()
+        return f'{self.CACHE_KEY_PREFIX}{ver}_sp{self.space.id}_{hashed}'
 
     def _get_cached_normalized(self, ingredient_text: str) -> Optional[NormalizedIngredient]:
         if not self.use_cache:
@@ -312,31 +335,90 @@ class IngredientNormalizationService:
 
     @classmethod
     def invalidate_space_cache(cls, space_id: int):
+        """
+        Invalidate all cached normalization results for a specific space/tenant.
+        Uses delete_pattern when available (Redis), otherwise falls back
+        to version bump which achieves the same effect across all workers.
+        """
         try:
             from django.core.cache import caches
             cache = caches['default']
             pattern = f'{cls.CACHE_KEY_PREFIX}*_sp{space_id}_*'
             try:
                 cache.delete_pattern(pattern)
+                logger.info('Invalidated space cache for space_id=%d via delete_pattern', space_id)
             except (AttributeError, NotImplementedError):
-                pass
+                cls.bump_cache_version()
+                logger.info('Invalidated space cache for space_id=%d via version bump', space_id)
         except Exception as e:
             logger.debug('Cache invalidation failed: %s', str(e))
 
     @classmethod
+    def invalidate_on_automation_change(cls, space_id: int):
+        """
+        Called when automation rules change for a space.
+        Invalidates cached results that depend on automation output.
+        Since automation results are baked into cache keys via version,
+        bumping the version ensures all workers recalculate.
+        """
+        cls.invalidate_space_cache(space_id)
+
+    @classmethod
     def bump_cache_version(cls, delta: int = 1) -> int:
+        """
+        Atomically increment the global cache version in Redis.
+        All workers will see the new version on their next cache key
+        computation, causing a natural cache miss and recomputation.
+        Old cache entries expire naturally via TTL.
+
+        This is the primary mechanism for cross-worker cache invalidation:
+        - No distributed locks needed
+        - No need to delete individual keys
+        - Old workers with stale code get different keys automatically
+        - Old cache entries expire via TTL (no manual cleanup needed)
+        """
         from django.core.cache import caches
         cache = caches['default']
         ver_key = f'{cls.CACHE_KEY_PREFIX}_global_version'
         try:
             new_ver = cache.incr(ver_key, delta)
+            logger.info('Cache version bumped to %d', new_ver)
         except Exception:
             new_ver = getattr(settings, 'INGREDIENT_NORMALIZATION_CACHE_VERSION', 1) + delta
             try:
                 cache.set(ver_key, new_ver, 60 * 60 * 24 * 365)
+                logger.info('Cache version initialized to %d', new_ver)
             except Exception:
                 pass
         return new_ver
+
+    @classmethod
+    def get_invalidation_strategy(cls) -> dict:
+        """
+        Returns a dict documenting the cache invalidation strategy.
+        Useful for operational runbooks and debugging.
+        """
+        return {
+            'key_format': 'ing_norm_v{VERSION}_sp{SPACE_ID}_{SHA256(TEXT)}',
+            'version_sources': [
+                'INGREDIENT_NORMALIZATION_CACHE_VERSION (settings/env)',
+                'Redis global_version (bumped atomically on change)',
+            ],
+            'invalidation_triggers': {
+                'automation_rule_change': 'invalidate_on_automation_change(space_id) - bumps version for space',
+                'tenant_data_change': 'invalidate_space_cache(space_id) - delete_pattern or version bump',
+                'code_upgrade': 'bump_cache_version() - global version bump, all workers see new keys',
+                'dictionary_version_switch': 'bump_cache_version() - same as code upgrade',
+                'settings_change': 'INGREDIENT_NORMALIZATION_CACHE_VERSION env change - new keys on restart',
+            },
+            'old_worker_fallback': {
+                'mechanism': 'Old workers use old cache_version in key, naturally miss new-version cache',
+                'result': 'Old workers recompute and write to old keys; new workers write to new keys',
+                'cleanup': 'Old keys expire via INGREDIENT_NORMALIZATION_CACHE_TTL (default 24h)',
+                'convergence': 'All workers converge once redeployed with new CACHE_VERSION setting',
+            },
+            'ttl': 'INGREDIENT_NORMALIZATION_CACHE_TTL (default 86400 seconds / 24 hours)',
+        }
 
     def normalize_name(self, name: str) -> str:
         if not name:

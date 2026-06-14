@@ -100,6 +100,130 @@ SAMPLE_INGREDIENTS = {
 }
 
 
+def generate_realistic_dataset(total_count):
+    """
+    Generate a realistic 50k ingredient dataset by combining:
+    - Base templates with variable amounts (numeric variation)
+    - Shuffle of units (g, kg, ml, l, tbsp, tsp, cups, pieces)
+    - Shuffle of foods (300+ food names across 4 languages)
+    - Notes variation (organic, fresh, frozen, diced, sliced, etc.)
+    - Fractional amounts (½, ¼, ⅓, 1 ½, etc.)
+    Returns a list of ingredient strings with realistic distribution.
+    """
+    from random import Random
+    rng = Random(12345)
+
+    en_foods = [
+        'flour', 'sugar', 'butter', 'eggs', 'milk', 'cream', 'cheese', 'parmesan',
+        'chicken breast', 'beef', 'pork', 'lamb', 'salmon', 'tuna', 'shrimp', 'bacon',
+        'rice', 'pasta', 'bread', 'noodles', 'oats', 'cornmeal', 'breadcrumbs',
+        'onion', 'garlic', 'carrot', 'potato', 'tomato', 'celery', 'leek', 'pepper',
+        'broccoli', 'cauliflower', 'spinach', 'mushroom', 'zucchini', 'eggplant',
+        'apple', 'banana', 'orange', 'lemon', 'lime', 'strawberry', 'blueberry',
+        'salt', 'pepper', 'paprika', 'cumin', 'cinnamon', 'oregano', 'basil', 'thyme',
+        'parsley', 'cilantro', 'ginger', 'turmeric', 'nutmeg', 'clove', 'bay leaf',
+        'olive oil', 'vegetable oil', 'sesame oil', 'coconut oil', 'vinegar',
+        'soy sauce', 'honey', 'maple syrup', 'mustard', 'ketchup', 'mayonnaise',
+        'chicken stock', 'vegetable stock', 'beef stock', 'white wine', 'red wine',
+        'almond', 'walnut', 'pecan', 'peanut', 'cashew', 'pine nut', 'coconut',
+        'dark chocolate', 'cocoa powder', 'vanilla extract', 'baking powder',
+        'baking soda', 'yeast', 'gelatin', 'cornstarch', 'arrowroot',
+        'tofu', 'tempeh', 'seitan', 'lentils', 'chickpeas', 'black beans',
+        'kidney beans', 'peas', 'corn', 'cabbage', 'kale', 'chard', 'arugula',
+        'avocado', 'mango', 'pineapple', 'papaya', 'pomegranate', 'fig', 'date',
+        'raisin', 'cranberry', 'apricot', 'peach', 'pear', 'plum', 'cherry',
+        'watermelon', 'cantaloupe', 'grape', 'kiwi', 'passion fruit',
+    ]
+    zh_foods = [
+        '面粉', '白糖', '红糖', '黄油', '鸡蛋', '牛奶', '奶油', '奶酪',
+        '鸡胸肉', '牛肉', '猪肉', '羊肉', '三文鱼', '虾', '培根', '香肠',
+        '大米', '面条', '馒头', '饺子皮', '燕麦', '玉米面', '面包屑',
+        '洋葱', '大蒜', '姜', '胡萝卜', '土豆', '番茄', '芹菜', '青椒',
+        '西兰花', '花菜', '菠菜', '蘑菇', '茄子', '豆角', '白菜', '豆芽',
+        '苹果', '香蕉', '橙子', '柠檬', '草莓', '蓝莓', '西瓜', '芒果',
+        '盐', '酱油', '醋', '料酒', '蚝油', '豆瓣酱', '甜面酱', '芝麻酱',
+        '五香粉', '花椒粉', '辣椒粉', '白胡椒粉', '孜然粉', '咖喱粉',
+        '花生油', '菜籽油', '芝麻油', '橄榄油', '猪油', '辣椒油',
+        '豆腐', '腐竹', '粉丝', '木耳', '香菇', '金针菇', '海带',
+        '花生', '核桃', '芝麻', '红枣', '枸杞', '莲子', '百合',
+        '冰糖', '蜂蜜', '淀粉', '糯米粉', '小苏打', '泡打粉',
+    ]
+    fr_foods = [
+        'farine', 'sucre', 'beurre', 'oeufs', 'lait', 'crème', 'fromage', 'parmesan',
+        'poulet', 'boeuf', 'porc', 'agneau', 'saumon', 'thon', 'crevettes', 'lard',
+        'riz', 'pâtes', 'pain', 'nouilles', 'avoine', 'semoule', 'chapelure',
+        'oignon', 'ail', 'carotte', 'pomme de terre', 'tomate', 'céleri', 'poireau',
+        'brocoli', 'chou-fleur', 'épinard', 'champignon', 'courgette', 'aubergine',
+        'pomme', 'banane', 'orange', 'citron', 'fraise', 'myrtille', 'framboise',
+        'sel', 'poivre', 'paprika', 'cumin', 'cannelle', 'origan', 'basilic', 'thym',
+        'persil', 'coriandre', 'gingembre', 'curcuma', 'muscade', 'laurier',
+        'huile d\'olive', 'huile végétale', 'vinaigre', 'sauce soja', 'miel',
+        'moutarde', 'bouillon', 'vin blanc', 'vin rouge', 'chocolat noir',
+        'amande', 'noix', 'noisette', 'cacao', 'levure', 'maïzena',
+    ]
+    ja_foods = [
+        '小麦粉', '砂糖', 'バター', '卵', '牛乳', '生クリーム', 'チーズ', 'パルメザン',
+        '鶏肉', '牛肉', '豚肉', '鮭', 'エビ', 'ベーコン', 'ソーセージ',
+        '米', 'パスタ', 'パン', 'うどん', 'そば', '片栗粉', 'パン粉',
+        '玉ねぎ', 'にんにく', '生姜', 'ニンジン', 'ジャガイモ', 'トマト', 'セロリ',
+        'ブロッコリー', 'カリフラワー', 'ほうれん草', 'しいたけ', 'なす', 'きのこ',
+        'りんご', 'バナナ', 'オレンジ', 'レモン', 'いちご', '抹茶', '小豆',
+        '塩', '醤油', '酢', 'みりん', '酒', '味噌', 'だし', '出汁',
+        'さとう', 'こしょう', '七味', 'わさび', 'しょうが', 'ごま',
+        'ごま油', 'サラダ油', 'オリーブ油', 'ラー油', '豆腐', '納豆', 'もやし',
+        '昆布', 'のり', 'わかめ', 'れんこん', 'ごぼう', '大根', 'かぼちゃ',
+    ]
+
+    all_foods = {'en': en_foods, 'zh': zh_foods, 'fr': fr_foods, 'ja': ja_foods}
+
+    units_by_lang = {
+        'en': ['g', 'kg', 'ml', 'l', 'tbsp', 'tsp', 'cup', 'cups', 'oz', 'lb', 'piece', 'pinch', 'clove'],
+        'zh': ['克', '千克', '毫升', '升', '汤匙', '茶匙', '杯', '个', '片', '根', '瓣', '少许', '适量'],
+        'fr': ['g', 'kg', 'ml', 'l', 'cuillère à soupe', 'cuillère à café', 'tasse', 'pièce', 'pincée', 'gousse'],
+        'ja': ['g', 'kg', 'ml', 'l', '大匙', '小匙', 'カップ', '個', '枚', '本', '片', '少々', '適量'],
+    }
+
+    notes = [
+        '', '', '', '', '', '',
+        ', organic', ', fresh', ', frozen', ', diced', ', sliced',
+        ', chopped', ', grated', ', minced', ', peeled', ', seeded',
+        ', room temperature', '(cold)', '(warm)', '(melted)', '(unsalted)',
+        '，新鲜的', '，冷冻', '，切片', '，切丝', '，切碎',
+    ]
+
+    fraction_prefixes = ['', '', '', '', '½ ', '¼ ', '⅓ ', '1 ½ ', '2 ½ ']
+
+    ingredients = []
+    lang_keys = list(all_foods.keys())
+
+    for _ in range(total_count):
+        lang = rng.choice(lang_keys)
+        foods = all_foods[lang]
+        units = units_by_lang[lang]
+        food = rng.choice(foods)
+        unit = rng.choice(units)
+        base_amount = rng.randint(1, 999)
+        frac = rng.choice(fraction_prefixes)
+        note = rng.choice(notes)
+
+        if frac:
+            ing = f'{frac}{unit} {food}{note}'
+        else:
+            ing = f'{base_amount} {unit} {food}{note}'
+
+        ingredients.append(ing)
+
+    return ingredients
+
+
+CAPACITY_REFERENCE = {
+    '1k_ingredients': {'recipes': 67, 'ingredients_per_recipe': 15, 'description': 'Small import (~1k ingredients)'},
+    '5k_ingredients': {'recipes': 333, 'ingredients_per_recipe': 15, 'description': 'Medium import (~5k ingredients)'},
+    '10k_ingredients': {'recipes': 667, 'ingredients_per_recipe': 15, 'description': 'Large import (~10k ingredients)'},
+    '50k_ingredients': {'recipes': 2500, 'ingredients_per_recipe': 20, 'description': 'Enterprise migration (~50k ingredients)'},
+}
+
+
 def setup_request_and_space():
     User = get_user_model()
     user = User.objects.filter(username='benchmark_user').first()
@@ -130,6 +254,30 @@ def generate_ingredient_list(count, locale, pool):
     return rng.choices(pool.get(locale, pool['en']), k=count)
 
 
+def print_capacity_reference():
+    print(f"\n{'='*70}")
+    print(f"  Capacity Reference Table")
+    print(f"{'='*70}")
+    print(f"  {'Scale':<25} {'Recipes':>8} {'Ing/Rec':>8} {'Total Ing':>10} {'Est. Time':>10}")
+    print(f"  {'-'*25} {'-'*8} {'-'*8} {'-'*10} {'-'*10}")
+    estimates = [
+        ('Small (~1k)', 67, 15, 1005, '<1s'),
+        ('Medium (~5k)', 333, 15, 4995, '~3s'),
+        ('Large (~10k)', 667, 15, 10005, '~6s'),
+        ('XL (~25k)', 1667, 15, 25005, '~15s'),
+        ('Enterprise (~50k)', 2500, 20, 50000, '~30s'),
+    ]
+    for name, rec, ipr, total, est in estimates:
+        print(f"  {name:<25} {rec:>8} {ipr:>8} {total:>10} {est:>10}")
+    print(f"\n  SLA Targets (per development machine baseline):")
+    print(f"    Avg ingredient latency:  < 1ms")
+    print(f"    P99 ingredient latency:  < 10ms")
+    print(f"    Throughput:              > 1,000 ingredients/s")
+    print(f"    Cache hit ratio (50k):   > 60% (realistic dedup)")
+    print(f"    Error rate:              < 0.1%")
+    print(f"{'='*70}")
+
+
 def run_benchmark(args):
     request, space = setup_request_and_space()
 
@@ -137,6 +285,7 @@ def run_benchmark(args):
     ings_per_recipe = args.ingredients
     use_cache = bool(args.cache)
     locale = args.locale
+    use_realistic = args.dataset
 
     settings.INGREDIENT_NORMALIZATION_USE_CACHE = use_cache
     settings.INGREDIENT_NORMALIZATION_FALLBACK_ENABLED = False
@@ -154,9 +303,12 @@ def run_benchmark(args):
     print(f"  Ingredients/Rec.:  {ings_per_recipe}")
     print(f"  Total ingredients: {total_recipes * ings_per_recipe}")
     print(f"  Cache enabled:     {use_cache}")
-    print(f"  Locale preset:     {locale}")
+    print(f"  Dataset:           {'Realistic 50k' if use_realistic else locale}")
     print(f"  Django cache:      {settings.CACHES['default']['BACKEND']}")
     print(f"{'='*60}")
+
+    if args.capacity:
+        print_capacity_reference()
 
     if args.warmup > 0:
         print(f"\n[WARMUP] {args.warmup} iterations...")
@@ -167,11 +319,21 @@ def run_benchmark(args):
                     service.normalize(ing)
         print("[WARMUP] done.")
 
-    all_ingredients = []
-    for r in range(total_recipes):
-        all_ingredients.append(
-            generate_ingredient_list(ings_per_recipe, locale, SAMPLE_INGREDIENTS)
-        )
+    if use_realistic:
+        total_needed = total_recipes * ings_per_recipe
+        print(f"\n[DATASET] Generating {total_needed} realistic ingredients...")
+        all_flat = generate_realistic_dataset(total_needed)
+        all_ingredients = []
+        for i in range(0, len(all_flat), ings_per_recipe):
+            all_ingredients.append(all_flat[i:i + ings_per_recipe])
+        all_ingredients = all_ingredients[:total_recipes]
+        print(f"[DATASET] Done. {len(all_flat)} ingredients across {len(all_ingredients)} recipes.")
+    else:
+        all_ingredients = []
+        for r in range(total_recipes):
+            all_ingredients.append(
+                generate_ingredient_list(ings_per_recipe, locale, SAMPLE_INGREDIENTS)
+            )
 
     recipe_latencies = []
     ingredient_latencies = []
@@ -372,6 +534,10 @@ def main():
     parser.add_argument('--locale', type=str, default='mixed',
                         choices=['en', 'zh', 'fr', 'ja', 'mixed'],
                         help='Locale preset (default: mixed)')
+    parser.add_argument('--dataset', action='store_true', default=False,
+                        help='Use realistic 50k multi-language dataset instead of simple samples')
+    parser.add_argument('--capacity', action='store_true', default=False,
+                        help='Print capacity reference table')
     parser.add_argument('--report', type=str, default=None,
                         help='Write JSON report to file')
 
