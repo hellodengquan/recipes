@@ -92,14 +92,31 @@ class ScopeMiddleware:
                 with scopes_disabled():
                     try:
                         if auth := OAuth2Authentication().authenticate(request):
-                            user_space = auth[0].userspace_set.filter(active=True).first()
+                            user = auth[0]
+                            user_space = user.userspace_set.filter(active=True).first()
+
+                            if not user_space and user.userspace_set.count() > 0:
+                                user_space = user.userspace_set.first()
+                                if user_space:
+                                    user_space.active = True
+                                    user_space.save()
+
                             if user_space:
-                                # Double-check that the user still has a valid UserSpace for this space
                                 try:
                                     from cookbook.models import UserSpace
-                                    user_space = UserSpace.objects.filter(pk=user_space.pk, user=auth[0]).first()
+                                    user_space = UserSpace.objects.filter(pk=user_space.pk, user=user).first()
                                 except Exception:
                                     user_space = None
+
+                            if not user_space:
+                                user_space = create_space_for_user(user)
+
+                            if user_space.groups.count() == 0:
+                                request.space = None
+                                request.user_space = None
+                                with scopes_disabled():
+                                    return views.no_groups(request)
+
                             if user_space:
                                 request.space = user_space.space
                                 request.user_space = user_space

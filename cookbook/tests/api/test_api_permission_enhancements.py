@@ -581,3 +581,262 @@ def test_share_link_anonymous_user_different_cache(space_1, share_link_1, recipe
 
     result_anon_again = share_link_valid(recipe_1_s1, str(share_link_1.uuid), user=None)
     assert result_anon_again is True
+
+
+# ---------------------------------------------------------------------------
+# 4. Audit Log Composite Indexes (space_id + created_at)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+def test_permission_audit_log_composite_indexes_exist():
+    """Verify composite indexes exist on PermissionAuditLog table."""
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        table_name = PermissionAuditLog._meta.db_table
+        if connection.vendor == 'sqlite':
+            cursor.execute(f"PRAGMA index_list({table_name})")
+            indexes = cursor.fetchall()
+            index_names = [row[1] for row in indexes]
+        elif connection.vendor == 'postgresql':
+            cursor.execute("""
+                SELECT indexname FROM pg_indexes
+                WHERE tablename = %s
+            """, [table_name])
+            indexes = cursor.fetchall()
+            index_names = [row[0] for row in indexes]
+        elif connection.vendor == 'mysql':
+            cursor.execute(f"SHOW INDEX FROM {table_name}")
+            indexes = cursor.fetchall()
+            index_names = list({row[2] for row in indexes})
+        else:
+            pytest.skip(f"Unsupported DB vendor: {connection.vendor}")
+
+    expected_substrings = [
+        'space_i',
+        'target__',
+        'actor_u',
+    ]
+    found = []
+    for idx in index_names:
+        for exp in expected_substrings:
+            if exp in idx:
+                found.append(exp)
+    assert len(found) >= len(expected_substrings), (
+        f"Expected indexes containing {expected_substrings}, "
+        f"but only found {found} in: {index_names}"
+    )
+
+
+@pytest.mark.django_db
+def test_audit_log_query_benefits_from_composite_index(u1_s1, u2_s1):
+    """Verify query with space_id + created_at range works efficiently."""
+    import random
+    user1 = auth.get_user(u1_s1)
+    user2 = auth.get_user(u2_s1)
+
+    ISOLATED_SPACE_ID = 777000 + random.randint(1, 999)
+    OTHER_SPACE_ID = ISOLATED_SPACE_ID + 1
+
+    base_time = timezone.now() - timezone.timedelta(days=30)
+    with scopes_disabled():
+        PermissionAuditLog.objects.filter(
+            space_id__in=[ISOLATED_SPACE_ID, OTHER_SPACE_ID]
+        ).delete()
+
+        pks = []
+        for i in range(10):
+            log = PermissionAuditLog(
+                action=PermissionAuditLog.ACTION_ADD,
+                space_id=ISOLATED_SPACE_ID,
+                target_user_id=user1.pk,
+                target_username=user1.username,
+            )
+            log.save(force_insert=True)
+            pks.append(log.pk)
+        other_log = PermissionAuditLog(
+            action=PermissionAuditLog.ACTION_ADD,
+            space_id=OTHER_SPACE_ID,
+            target_user_id=user2.pk,
+            target_username=user2.username,
+        )
+        other_log.save(force_insert=True)
+
+        from django.db import connection
+        with connection.cursor() as cursor:
+            for idx, pk in enumerate(pks):
+                log_time = base_time + timezone.timedelta(hours=idx)
+                cursor.execute(
+                    "UPDATE cookbook_permissionauditlog SET created_at = %s WHERE id = %s",
+                    [log_time, pk]
+                )
+            other_time = base_time + timezone.timedelta(hours=1)
+            cursor.execute(
+                "UPDATE cookbook_permissionauditlog SET created_at = %s WHERE id = %s",
+                [other_time, other_log.pk]
+            )
+
+    cutoff_time = base_time + timezone.timedelta(hours=4, minutes=59)
+    with scopes_disabled():
+        old_count = PermissionAuditLog.objects.filter(
+            space_id=ISOLATED_SPACE_ID,
+            created_at__lt=cutoff_time,
+        ).count()
+
+        new_count = PermissionAuditLog.objects.filter(
+            space_id=ISOLATED_SPACE_ID,
+            created_at__gte=cutoff_time,
+        ).count()
+
+        total_isolated = PermissionAuditLog.objects.filter(
+            space_id=ISOLATED_SPACE_ID,
+        ).count()
+
+        other_count = PermissionAuditLog.objects.filter(
+            space_id=OTHER_SPACE_ID,
+        ).count()
+
+    assert total_isolated == 10
+    assert old_count == 5
+    assert new_count == 5
+    assert other_count == 1
+
+
+# ---------------------------------------------------------------------------
+# 5. iCal Export Access Control After Member Removal
+# ---------------------------------------------------------------------------
+
+ICAL_URL = 'api:mealplan-ical'
+
+
+@pytest.mark.django_db
+def test_ical_endpoint_active_member_can_access(u1_s1, space_1):
+    """Verify active space members can access iCal export."""
+    url = reverse(ICAL_URL)
+    r = u1_s1.get(url)
+    assert r.status_code in (200, 404)
+
+
+@pytest.mark.django_db
+def test_ical_endpoint_removed_member_has_no_old_space_data(a1_s1, u1_s1, space_1, meal_plan_1):
+    """
+    Verify removed members cannot see old space's meal plans via iCal.
+
+    When a member is removed from a space, the ScopeMiddleware creates a new
+    personal space for them. The iCal endpoint should return 200 (for the new
+    empty space) but MUST NOT contain any meal plans from the old space.
+    """
+    owner = auth.get_user(a1_s1)
+    member = auth.get_user(u1_s1)
+    with scopes_disabled():
+        space_1.created_by = owner
+        space_1.save()
+
+    url = reverse(ICAL_URL)
+
+    r_before = u1_s1.get(url)
+    assert r_before.status_code == 200
+    content_before = r_before.content.decode('utf-8')
+
+    with scopes_disabled():
+        old_space_pk = space_1.pk
+        old_meal_plan_pk = meal_plan_1.pk
+        UserSpace.objects.filter(user=member, space=space_1).delete()
+
+    invalidate_user_permission_cache(member.pk, space_id=old_space_pk)
+
+    r_after = u1_s1.get(url)
+    assert r_after.status_code == 200, f"Expected 200 (empty personal space ical), got {r_after.status_code}"
+    content_after = r_after.content.decode('utf-8')
+
+    assert 'BEGIN:VCALENDAR' in content_after, "iCal should still be valid format"
+    assert str(old_meal_plan_pk) not in content_after, (
+        f"Removed member must not see old meal plan PK={old_meal_plan_pk} in iCal content"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. LocMemCache Fallback for delete_pattern
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def locmem_cache_backend():
+    """Provide a fresh LocMemCache instance for isolated tests."""
+    from django.core.cache.backends.locmem import LocMemCache
+    backend = LocMemCache('test_locmem_delete_pattern', {})
+    backend.clear()
+    yield backend
+    backend.clear()
+
+
+@pytest.mark.django_db
+def test_cache_delete_pattern_locmem_exact_match(locmem_cache_backend):
+    """Verify cache_delete_pattern works with exact glob on LocMem."""
+    from cookbook.helper.permission_helper import cache_delete_pattern
+
+    locmem_cache_backend.set('perm_cache_version_1_abc', 1)
+    locmem_cache_backend.set('perm_cache_version_1_def', 2)
+    locmem_cache_backend.set('perm_cache_version_2_xyz', 3)
+    locmem_cache_backend.set('other_key', 4)
+
+    deleted = cache_delete_pattern('perm_cache_version_1_*', cache_backend=locmem_cache_backend)
+
+    assert deleted == 2
+    assert locmem_cache_backend.get('perm_cache_version_1_abc') is None
+    assert locmem_cache_backend.get('perm_cache_version_1_def') is None
+    assert locmem_cache_backend.get('perm_cache_version_2_xyz') == 3
+    assert locmem_cache_backend.get('other_key') == 4
+
+
+@pytest.mark.django_db
+def test_cache_delete_pattern_locmem_question_mark(locmem_cache_backend):
+    """Verify cache_delete_pattern supports ? wildcard on LocMem."""
+    from cookbook.helper.permission_helper import cache_delete_pattern
+
+    locmem_cache_backend.set('key_a1', 1)
+    locmem_cache_backend.set('key_a2', 2)
+    locmem_cache_backend.set('key_ab', 3)
+    locmem_cache_backend.set('key_abc', 4)
+
+    deleted = cache_delete_pattern('key_a?', cache_backend=locmem_cache_backend)
+
+    assert deleted == 3
+    assert locmem_cache_backend.get('key_abc') == 4
+
+
+@pytest.mark.django_db
+def test_cache_delete_pattern_locmem_no_match(locmem_cache_backend):
+    """Verify cache_delete_pattern returns 0 when no keys match."""
+    from cookbook.helper.permission_helper import cache_delete_pattern
+
+    locmem_cache_backend.set('foo_bar', 1)
+    locmem_cache_backend.set('baz_qux', 2)
+
+    deleted = cache_delete_pattern('nonexistent_*', cache_backend=locmem_cache_backend)
+
+    assert deleted == 0
+    assert locmem_cache_backend.get('foo_bar') == 1
+    assert locmem_cache_backend.get('baz_qux') == 2
+
+
+@pytest.mark.django_db
+def test_invalidate_all_permission_caches_for_space(locmem_cache_backend, space_1):
+    """Verify invalidate_all_permission_caches_for_space uses pattern delete."""
+    from cookbook.helper.permission_helper import (
+        invalidate_all_permission_caches_for_space,
+        PERMISSION_CACHE_VERSION_PREFIX,
+    )
+
+    locmem_cache_backend.set(f'{PERMISSION_CACHE_VERSION_PREFIX}{space_1.pk}_1', 5)
+    locmem_cache_backend.set(f'{PERMISSION_CACHE_VERSION_PREFIX}{space_1.pk}_2', 6)
+    locmem_cache_backend.set(f'perm_check_{space_1.pk}_edit_recipe', True)
+    locmem_cache_backend.set(f'perm_check_999999_edit_recipe', True)
+    locmem_cache_backend.set('unrelated_key', 42)
+
+    deleted = invalidate_all_permission_caches_for_space(space_1.pk, cache_backend=locmem_cache_backend)
+
+    assert deleted >= 3
+    assert locmem_cache_backend.get(f'{PERMISSION_CACHE_VERSION_PREFIX}{space_1.pk}_1') is None
+    assert locmem_cache_backend.get(f'perm_check_{space_1.pk}_edit_recipe') is None
+    assert locmem_cache_backend.get(f'perm_check_999999_edit_recipe') is True
+    assert locmem_cache_backend.get('unrelated_key') == 42

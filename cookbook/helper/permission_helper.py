@@ -263,6 +263,148 @@ def invalidate_household_cache(user_space):
         cache.delete(f'household_user_ids_{user_space.space_id}_{user_space.household_id}')
 
 
+def cache_delete_pattern(pattern, cache_backend=None):
+    """
+    Delete cache keys matching a glob pattern with cross-backend compatibility.
+
+    - Redis / django.core.cache.backends.redis.RedisCache:
+      Uses native cache.delete_pattern(pattern) which is O(N) on Redis server
+      but atomic and efficient across all workers.
+    - LocMemCache and other backends without delete_pattern support:
+      Iterates over cache keys via the private store and deletes individually.
+      This may be slow for large caches but is the only reliable way to
+      avoid silent failure on non-Redis backends.
+
+    :param pattern: Glob-style pattern (e.g. 'perm_cache_version_*')
+    :param cache_backend: Optional cache instance; defaults to django.core.cache.cache
+    :return: Number of keys deleted
+    """
+    import fnmatch
+    import re
+
+    if cache_backend is None:
+        from django.core.cache import cache as default_cache
+        cache_backend = default_cache
+
+    deleted = 0
+
+    try:
+        is_redis = False
+        try:
+            from django.core.cache.backends.redis import RedisCache
+            is_redis = isinstance(cache_backend, RedisCache)
+        except Exception:
+            is_redis = False
+
+        if not is_redis:
+            try:
+                backend_full_name = f"{type(cache_backend).__module__}.{type(cache_backend).__name__}"
+                if 'RedisCache' in backend_full_name or 'redis' in backend_full_name.lower():
+                    is_redis = True
+            except Exception:
+                pass
+
+        if not is_redis:
+            is_redis = _is_redis_backend()
+
+        if is_redis:
+            try:
+                cache_backend.delete_pattern(pattern)
+                try:
+                    matched = cache_backend.keys(pattern)
+                    deleted = len(matched) if matched else 0
+                except Exception:
+                    deleted = 0
+                return deleted
+            except (AttributeError, NotImplementedError):
+                pass
+
+        from django.core.cache.backends.locmem import LocMemCache
+        is_locmem = isinstance(cache_backend, LocMemCache)
+
+        if is_locmem:
+            raw_keys = list(cache_backend._cache.keys())
+            version_prefix = getattr(cache_backend, 'make_key', None)
+            try:
+                sample_key = cache_backend.make_key('__probe__')
+                prefix = sample_key[:sample_key.rfind('__probe__')]
+            except Exception:
+                prefix = ':1:'
+
+            regex = re.compile(fnmatch.translate(pattern))
+            matched_unprefixed = []
+            for raw in raw_keys:
+                if prefix and raw.startswith(prefix):
+                    unprefixed = raw[len(prefix):]
+                else:
+                    unprefixed = raw
+                if regex.match(unprefixed) or fnmatch.fnmatch(unprefixed, pattern):
+                    matched_unprefixed.append(unprefixed)
+
+            if matched_unprefixed:
+                try:
+                    cache_backend.delete_many(matched_unprefixed)
+                    deleted = len(matched_unprefixed)
+                except Exception:
+                    for unprefixed in matched_unprefixed:
+                        try:
+                            cache_backend.delete(unprefixed)
+                            deleted += 1
+                        except Exception:
+                            continue
+            return deleted
+
+        try:
+            matched_keys = cache_backend.keys(pattern)
+        except Exception:
+            matched_keys = None
+
+        if matched_keys:
+            try:
+                cache_backend.delete_many(matched_keys)
+                deleted = len(matched_keys)
+            except Exception:
+                for key in matched_keys:
+                    try:
+                        cache_backend.delete(key)
+                        deleted += 1
+                    except Exception:
+                        continue
+
+        return deleted
+    except Exception as e:
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning("cache_delete_pattern failed for pattern %s: %s", pattern, e)
+        except Exception:
+            pass
+        return 0
+
+
+def invalidate_all_permission_caches_for_space(space_id, cache_backend=None):
+    """
+    Bulk-invalidate all permission caches for a given space.
+
+    This is useful when an entire space is being deleted, or when a bulk
+    operation removes many members at once. Clears:
+    - perm_cache_version_{space_id}_*  (version counters)
+    - perm_*_{space_id}_*              (individual permission results)
+
+    Uses cache_delete_pattern, which works correctly on both Redis and LocMem.
+    """
+    deleted_count = 0
+    deleted_count += cache_delete_pattern(
+        f'{PERMISSION_CACHE_VERSION_PREFIX}{space_id}_*',
+        cache_backend=cache_backend
+    )
+    deleted_count += cache_delete_pattern(
+        f'perm_*_{space_id}_*',
+        cache_backend=cache_backend
+    )
+    return deleted_count
+
+
 def share_link_valid(recipe, share, user=None):
     """
     Verifies the validity of a share uuid.
