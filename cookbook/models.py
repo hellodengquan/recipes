@@ -544,6 +544,7 @@ class UserPreference(models.Model, PermissionModelMixin):
     default_delay = models.DecimalField(default=4, max_digits=8, decimal_places=4)
     shopping_recent_days = models.PositiveIntegerField(default=7)
     shopping_update_food_lists = models.BooleanField(default=True)
+    shopping_use_inventory_deduction = models.BooleanField(default=False, help_text=_('Deduct inventory amounts from shopping list automatically'))
     csv_delim = models.CharField(max_length=2, default=",")
     csv_prefix = models.CharField(max_length=10, blank=True, )
     default_meal_type = models.ForeignKey("MealType", on_delete=models.SET_NULL, null=True, blank=True)

@@ -584,7 +584,7 @@ class UserPreferenceSerializer(WritableNestedModelSerializer):
             'mealplan_autoinclude_related', 'mealplan_autoexclude_onhand', 'shopping_recent_days',
             'csv_delim', 'csv_prefix', 'shopping_update_food_lists','default_meal_type',
             'filter_to_supermarket', 'shopping_add_onhand', 'left_handed', 'show_step_ingredients',
-            'food_children_exist'
+            'food_children_exist', 'shopping_use_inventory_deduction'
         )
         read_only_fields = ('user',)
 
@@ -1533,6 +1533,37 @@ class ShoppingListEntrySerializer(WritableNestedModelSerializer):
     completed_at = serializers.DateTimeField(allow_null=True, required=False)
     mealplan_id = serializers.IntegerField(required=False, write_only=True,
                                            help_text='If a mealplan id is given try to find existing or create new ShoppingListRecipe with that meal plan and link entry to it')
+    inventory_available = serializers.SerializerMethodField()
+    inventory_deducted = serializers.SerializerMethodField()
+    original_amount = serializers.SerializerMethodField()
+
+    @extend_schema_field(CustomDecimalField)
+    def get_inventory_available(self, obj):
+        from cookbook.helper.shopping_helper import get_food_inventory_total
+        request = self.context.get('request')
+        if not request:
+            return None
+        total, _ = get_food_inventory_total(obj.food, obj.unit, request.user, request.space)
+        return total
+
+    @extend_schema_field(CustomDecimalField)
+    def get_inventory_deducted(self, obj):
+        deducted = getattr(obj, '_inventory_deducted_amount', None)
+        if deducted is not None:
+            return deducted
+        if obj.ingredient and obj.list_recipe:
+            servings_factor = Decimal('1')
+            if obj.list_recipe.recipe and obj.list_recipe.recipe.servings and obj.list_recipe.servings:
+                servings_factor = Decimal(obj.list_recipe.servings) / Decimal(obj.list_recipe.recipe.servings)
+            original = obj.ingredient.amount * servings_factor
+            if original > obj.amount:
+                return original - obj.amount
+        return Decimal('0')
+
+    @extend_schema_field(CustomDecimalField)
+    def get_original_amount(self, obj):
+        deducted = self.get_inventory_deducted(obj)
+        return obj.amount + deducted
 
     def get_fields(self, *args, **kwargs):
         fields = super().get_fields(*args, **kwargs)
@@ -1602,9 +1633,10 @@ class ShoppingListEntrySerializer(WritableNestedModelSerializer):
         model = ShoppingListEntry
         fields = (
             'id', 'list_recipe', 'shopping_lists', 'food', 'unit', 'amount', 'order', 'checked', 'ingredient',
-            'list_recipe_data', 'created_by', 'created_at', 'updated_at', 'completed_at', 'delay_until', 'mealplan_id'
+            'list_recipe_data', 'created_by', 'created_at', 'updated_at', 'completed_at', 'delay_until', 'mealplan_id',
+            'inventory_available', 'inventory_deducted', 'original_amount'
         )
-        read_only_fields = ('id', 'created_by', 'created_at')
+        read_only_fields = ('id', 'created_by', 'created_at', 'inventory_available', 'inventory_deducted', 'original_amount')
 
 
 class ShoppingListEntrySimpleCreateSerializer(serializers.Serializer):

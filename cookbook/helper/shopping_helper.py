@@ -7,7 +7,8 @@ from django.utils.translation import gettext as _
 
 from cookbook.connectors.connector_manager import ActionType, ConnectorManager
 from cookbook.helper.permission_helper import get_household_user_ids
-from cookbook.models import Ingredient, MealPlan, Recipe, ShoppingListEntry, ShoppingListRecipe, SupermarketCategoryRelation
+from cookbook.helper.unit_conversion_helper import ConversionException, UnitConversionHelper
+from cookbook.models import Ingredient, InventoryEntry, MealPlan, Recipe, ShoppingListEntry, ShoppingListRecipe, SupermarketCategoryRelation, Household
 
 
 def shopping_helper(qs, request):
@@ -29,6 +30,110 @@ def shopping_helper(qs, request):
         supermarket_order = ['checked'] + supermarket_order
 
     return qs.distinct().order_by(*supermarket_order).select_related('unit', 'food', 'ingredient', 'created_by', 'list_recipe', 'list_recipe__mealplan', 'list_recipe__recipe')
+
+
+def get_household_inventory_qs(user, space):
+    """
+    Get a queryset of InventoryEntry objects for the user's household (or just the user if no household).
+    """
+    owner_user_space = user.userspace_set.filter(space=space).first()
+    if not owner_user_space:
+        return InventoryEntry.objects.none()
+    user_ids = get_household_user_ids(owner_user_space)
+    household_ids = list(
+        Household.objects.filter(
+            userspace__user_id__in=user_ids,
+            userspace__space=space
+        ).values_list('id', flat=True)
+    )
+    if len(household_ids) > 0:
+        return InventoryEntry.objects.filter(
+            inventory_location__household_id__in=household_ids,
+            space=space,
+            amount__gt=0
+        ).select_related('food', 'unit')
+    else:
+        return InventoryEntry.objects.none()
+
+
+def get_food_inventory_total(food, target_unit, user, space):
+    """
+    Calculate the total inventory amount for a given food, converted to the target unit.
+    Uses UnitConversionHelper for conversion.
+    Returns (total_amount, inventory_details) where inventory_details is a list of (amount, unit) tuples.
+    """
+    if not food:
+        return Decimal('0'), []
+
+    uch = UnitConversionHelper(space)
+    inventory_entries = get_household_inventory_qs(user, space).filter(food=food)
+
+    total = Decimal('0')
+    details = []
+
+    for entry in inventory_entries:
+        entry_amount = entry.amount or Decimal('0')
+        if entry_amount <= 0:
+            continue
+
+        details.append((entry_amount, entry.unit))
+
+        # If no target unit, just sum up (unlikely case but handle it)
+        if not target_unit:
+            if not entry.unit:
+                total += entry_amount
+            continue
+
+        # If same unit, add directly
+        if entry.unit and entry.unit.id == target_unit.id:
+            total += entry_amount
+            continue
+
+        # Try to convert using UnitConversionHelper
+        if entry.unit:
+            try:
+                temp_ingredient = Ingredient(
+                    amount=entry_amount,
+                    unit=entry.unit,
+                    food=food,
+                    space=space
+                )
+                conversions = uch.get_conversions(temp_ingredient)
+                # Find a conversion matching the target unit
+                for conv in conversions:
+                    if conv.unit and conv.unit.id == target_unit.id:
+                        total += conv.amount
+                        break
+            except (ConversionException, Exception):
+                pass
+
+    return total, details
+
+
+def calculate_inventory_deduction(food, required_amount, required_unit, user, space):
+    """
+    Calculate how much of a food's required amount can be deducted from inventory.
+    Returns:
+      - amount_needed: amount that still needs to be purchased (after deduction)
+      - amount_deducted: amount that was covered by inventory
+      - inventory_total: total inventory available (in required_unit if convertible)
+      - inventory_details: list of (amount, unit) for each stock entry
+    """
+    inventory_total, inventory_details = get_food_inventory_total(food, required_unit, user, space)
+
+    if required_amount is None:
+        required_amount = Decimal('0')
+
+    if inventory_total <= 0:
+        return required_amount, Decimal('0'), Decimal('0'), inventory_details
+
+    amount_deducted = min(required_amount, inventory_total)
+    amount_needed = required_amount - amount_deducted
+
+    if amount_needed < 0:
+        amount_needed = Decimal('0')
+
+    return amount_needed, amount_deducted, inventory_total, inventory_details
 
 
 class RecipeShoppingEditor():
@@ -97,6 +202,10 @@ class RecipeShoppingEditor():
     @property
     def _exclude_onhand(self):
         return self.created_by.userpreference.mealplan_autoexclude_onhand
+
+    @property
+    def _use_inventory_deduction(self):
+        return self.created_by.userpreference.shopping_use_inventory_deduction
 
     def create(self, **kwargs):
         ingredients = kwargs.get('ingredients', None)
@@ -181,20 +290,37 @@ class RecipeShoppingEditor():
 
         entries = []
         for i in [x for x in add_ingredients if x.food]:
-            entry =  ShoppingListEntry(
-                list_recipe=self._shopping_list_recipe,
-                food=i.food,
-                unit=i.unit,
-                ingredient=i,
-                amount=i.amount * Decimal(self._servings_factor),
-                created_by=self.created_by,
-                space=self.space,
-            )
-            entries.append(entry)
+            entry_amount = i.amount * Decimal(self._servings_factor)
 
-        ShoppingListEntry.objects.bulk_create(entries)
-        ConnectorManager.add_work(ActionType.CREATED, *entries)
-        for e in entries:
+            inventory_deducted = Decimal('0')
+            inventory_available = Decimal('0')
+
+            if self._use_inventory_deduction:
+                entry_amount, inventory_deducted, inventory_available, _ = calculate_inventory_deduction(
+                    i.food,
+                    entry_amount,
+                    i.unit,
+                    self.created_by,
+                    self.space
+                )
+
+            if entry_amount > 0 or inventory_deducted > 0:
+                entry = ShoppingListEntry(
+                    list_recipe=self._shopping_list_recipe,
+                    food=i.food,
+                    unit=i.unit,
+                    ingredient=i,
+                    amount=entry_amount,
+                    created_by=self.created_by,
+                    space=self.space,
+                )
+                entry._inventory_deducted_amount = inventory_deducted
+                entry._inventory_available_amount = inventory_available
+                entries.append(entry)
+
+        created_entries = ShoppingListEntry.objects.bulk_create(entries)
+        ConnectorManager.add_work(ActionType.CREATED, *created_entries)
+        for e in created_entries:
             if e.food.shopping_lists.count() > 0:
                 e.shopping_lists.set(e.food.shopping_lists.all())
 
