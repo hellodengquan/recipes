@@ -378,7 +378,9 @@ class CustomIsShare(permissions.BasePermission):
     def has_object_permission(self, request, view, obj):
         share = request.query_params.get('share', None)
         if share:
-            return share_link_valid(obj, share)
+            from django_scopes import scopes_disabled
+            with scopes_disabled():
+                return share_link_valid(obj, share)
         return False
 
 
