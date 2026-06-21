@@ -50,7 +50,7 @@ from oauth2_provider.models import AccessToken
 from recipe_scrapers import scrape_html
 from recipe_scrapers._exceptions import NoSchemaFoundInWildMode
 from requests.exceptions import MissingSchema
-from rest_framework import decorators, status, viewsets
+from rest_framework import decorators, serializers, status, viewsets
 from rest_framework import mixins
 from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.decorators import api_view, permission_classes
@@ -87,7 +87,7 @@ from cookbook.helper.recipe_search import RecipeSearch
 from cookbook.helper.recipe_url_import import clean_dict, get_from_youtube_scraper, get_images_from_soup
 from cookbook.helper.shopping_helper import RecipeShoppingEditor
 from cookbook.models import (Automation, BookmarkletImport, ConnectorConfig, CookLog, CustomFilter, ExportLog, Food,
-                             FoodInheritField, FoodProperty, ImportLog, Ingredient,
+                             FoodInheritField, FoodProperty, ImportLog, ImportRecipe, ImportIssue, Ingredient,
                              InviteLink, Keyword, MealPlan, MealType, Property, PropertyType, Recipe, RecipeBook,
                              RecipeBookEntry, ShareLink, ShoppingListEntry,
                              ShoppingListRecipe, Space, Step, Storage, Supermarket, SupermarketCategory,
@@ -103,7 +103,7 @@ from cookbook.serializer import (AccessTokenSerializer, AutomationSerializer, Au
                                  CookLogSerializer, CustomFilterSerializer,
                                  ExportLogSerializer, FoodInheritFieldSerializer, FoodSerializer,
                                  FoodShoppingUpdateSerializer, FoodSimpleSerializer, GroupSerializer,
-                                 ImportLogSerializer, IngredientSerializer, IngredientSimpleSerializer,
+                                 ImportLogSerializer, ImportRecipeSerializer, ImportIssueSerializer, IngredientSerializer, IngredientSimpleSerializer,
                                  InviteLinkSerializer, KeywordSerializer, MealPlanSerializer, MealTypeSerializer,
                                  PropertySerializer, PropertyTypeSerializer,
                                  RecipeBookEntrySerializer, RecipeBookSerializer, RecipeExportSerializer,
@@ -3405,3 +3405,203 @@ def meal_plans_to_ical(queryset, filename):
     response["Content-Disposition"] = f'inline; filename={filename}'
 
     return response
+
+
+@extend_schema_view(list=extend_schema(parameters=[
+    OpenApiParameter(name='status', description='Filter by import recipe status (PENDING, APPROVED, REJECTED)', type=str),
+    OpenApiParameter(name='issue_type', description='Filter by issue type associated with the recipe', type=str),
+    OpenApiParameter(name='import_log', description='Filter by associated import log ID', type=int),
+]))
+class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
+    queryset = ImportRecipe.objects
+    serializer_class = ImportRecipeSerializer
+    permission_classes = [CustomIsUser & CustomTokenHasReadWriteScope]
+    pagination_class = DefaultPagination
+
+    def get_queryset(self):
+        queryset = super().get_queryset().filter(space=self.request.space)
+        status = self.request.query_params.get('status', None)
+        if status:
+            queryset = queryset.filter(status=status)
+        import_log = self.request.query_params.get('import_log', None)
+        if import_log:
+            queryset = queryset.filter(import_log_id=import_log)
+        issue_type = self.request.query_params.get('issue_type', None)
+        if issue_type:
+            queryset = queryset.filter(issues__issue_type=issue_type).distinct()
+        return queryset
+
+    @extend_schema(
+        request=inline_serializer(name="ImportRecipeApproveSerializer", fields={
+            'ids': serializers.ListField(child=IntegerField()),
+        }),
+        responses=None,
+    )
+    @decorators.action(detail=False, methods=['post'], url_path='batch-approve')
+    def batch_approve(self, request):
+        ids = request.data.get('ids', [])
+        recipes_to_approve = self.get_queryset().filter(id__in=ids, status=ImportRecipe.STATUS_PENDING)
+        created_recipes = []
+        for import_recipe in recipes_to_approve:
+            recipe = self._convert_to_recipe(import_recipe, request.user)
+            if recipe:
+                created_recipes.append(recipe.id)
+                import_recipe.status = ImportRecipe.STATUS_APPROVED
+                import_recipe.save()
+        return Response({'created_recipes': created_recipes, 'count': len(created_recipes)})
+
+    @extend_schema(
+        request=inline_serializer(name="ImportRecipeRejectSerializer", fields={
+            'ids': serializers.ListField(child=IntegerField()),
+        }),
+        responses=None,
+    )
+    @decorators.action(detail=False, methods=['post'], url_path='batch-reject')
+    def batch_reject(self, request):
+        ids = request.data.get('ids', [])
+        updated = self.get_queryset().filter(id__in=ids).update(status=ImportRecipe.STATUS_REJECTED)
+        return Response({'count': updated})
+
+    @extend_schema(
+        request=inline_serializer(name="ImportRecipeUnitUpdateSerializer", fields={
+            'ids': serializers.ListField(child=IntegerField()),
+            'original_unit': serializers.CharField(),
+            'target_unit_id': IntegerField(),
+        }),
+        responses=None,
+    )
+    @decorators.action(detail=False, methods=['post'], url_path='batch-update-unit')
+    def batch_update_unit(self, request):
+        ids = request.data.get('ids', [])
+        original_unit = request.data.get('original_unit', '')
+        target_unit_id = request.data.get('target_unit_id')
+        try:
+            target_unit = Unit.objects.get(id=target_unit_id, space=request.space)
+        except Unit.DoesNotExist:
+            return Response({'error': 'Target unit not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        updated_count = 0
+        recipes = self.get_queryset().filter(id__in=ids)
+        for import_recipe in recipes:
+            recipe_data = import_recipe.recipe_data
+            if 'steps' in recipe_data:
+                for step in recipe_data['steps']:
+                    if 'ingredients' in step:
+                        for ing in step['ingredients']:
+                            if ing.get('unit') and (ing['unit'].get('name') == original_unit or ing['unit'].get('id') == original_unit):
+                                ing['unit'] = {'id': target_unit.id, 'name': target_unit.name}
+                                updated_count += 1
+            import_recipe.recipe_data = recipe_data
+            import_recipe.save()
+        return Response({'updated_count': updated_count})
+
+    @extend_schema(
+        request=inline_serializer(name="ImportRecipeMergeFoodSerializer", fields={
+            'ids': serializers.ListField(child=IntegerField()),
+            'original_food_names': serializers.ListField(child=serializers.CharField()),
+            'target_food_id': IntegerField(),
+        }),
+        responses=None,
+    )
+    @decorators.action(detail=False, methods=['post'], url_path='batch-merge-food')
+    def batch_merge_food(self, request):
+        ids = request.data.get('ids', [])
+        original_food_names = request.data.get('original_food_names', [])
+        target_food_id = request.data.get('target_food_id')
+        try:
+            target_food = Food.objects.get(id=target_food_id, space=request.space)
+        except Food.DoesNotExist:
+            return Response({'error': 'Target food not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        updated_count = 0
+        recipes = self.get_queryset().filter(id__in=ids)
+        for import_recipe in recipes:
+            recipe_data = import_recipe.recipe_data
+            if 'steps' in recipe_data:
+                for step in recipe_data['steps']:
+                    if 'ingredients' in step:
+                        for ing in step['ingredients']:
+                            if ing.get('food') and ing['food'].get('name') in original_food_names:
+                                ing['food'] = {'id': target_food.id, 'name': target_food.name}
+                                updated_count += 1
+            import_recipe.recipe_data = recipe_data
+            import_recipe.save()
+        return Response({'updated_count': updated_count})
+
+    @extend_schema(
+        request=inline_serializer(name="ImportRecipeImageUpdateSerializer", fields={
+            'ids': serializers.ListField(child=IntegerField()),
+            'image_url': serializers.CharField(required=False),
+            'image_file_id': IntegerField(required=False),
+        }),
+        responses=None,
+    )
+    @decorators.action(detail=False, methods=['post'], url_path='batch-update-image')
+    def batch_update_image(self, request):
+        ids = request.data.get('ids', [])
+        image_url = request.data.get('image_url')
+        image_file_id = request.data.get('image_file_id')
+
+        recipes = self.get_queryset().filter(id__in=ids)
+        updated_count = 0
+        for import_recipe in recipes:
+            if image_url:
+                import_recipe.image_url = image_url
+            if image_file_id:
+                recipe_data = import_recipe.recipe_data
+                recipe_data['image_file_id'] = image_file_id
+                import_recipe.recipe_data = recipe_data
+            import_recipe.save()
+            updated_count += 1
+        return Response({'updated_count': updated_count})
+
+    def _convert_to_recipe(self, import_recipe, user):
+        try:
+            recipe_data = import_recipe.recipe_data
+            recipe = Recipe.objects.create(
+                name=import_recipe.name or recipe_data.get('name', 'Imported Recipe'),
+                description=recipe_data.get('description', ''),
+                servings=recipe_data.get('servings', 1),
+                servings_text=recipe_data.get('servings_text', ''),
+                source_url=import_recipe.source_url,
+                created_by=user,
+                space=import_recipe.space,
+            )
+            if import_recipe.image_url:
+                recipe.link = import_recipe.image_url
+                recipe.save()
+            return recipe
+        except Exception as e:
+            return None
+
+
+class ImportIssueViewSet(LoggingMixin, viewsets.ModelViewSet):
+    queryset = ImportIssue.objects
+    serializer_class = ImportIssueSerializer
+    permission_classes = [CustomIsUser & CustomTokenHasReadWriteScope]
+    pagination_class = DefaultPagination
+
+    def get_queryset(self):
+        queryset = self.queryset.filter(space=self.request.space)
+        issue_type = self.request.query_params.get('issue_type', None)
+        if issue_type:
+            queryset = queryset.filter(issue_type=issue_type)
+        resolved = self.request.query_params.get('resolved', None)
+        if resolved is not None:
+            queryset = queryset.filter(resolved=str2bool(resolved))
+        import_recipe = self.request.query_params.get('import_recipe', None)
+        if import_recipe:
+            queryset = queryset.filter(import_recipe_id=import_recipe)
+        return queryset
+
+    @extend_schema(
+        request=inline_serializer(name="ImportIssueResolveSerializer", fields={
+            'ids': serializers.ListField(child=IntegerField()),
+        }),
+        responses=None,
+    )
+    @decorators.action(detail=False, methods=['post'], url_path='batch-resolve')
+    def batch_resolve(self, request):
+        ids = request.data.get('ids', [])
+        updated = self.get_queryset().filter(id__in=ids).update(resolved=True)
+        return Response({'count': updated})

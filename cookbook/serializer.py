@@ -33,7 +33,7 @@ from cookbook.helper.property_helper import FoodPropertyHelper
 from cookbook.helper.shopping_helper import RecipeShoppingEditor
 from cookbook.helper.unit_conversion_helper import UnitConversionHelper
 from cookbook.models import (Automation, BookmarkletImport, Comment, CookLog, CustomFilter,
-                             ExportLog, Food, FoodInheritField, ImportLog, Ingredient, InviteLink,
+                             ExportLog, Food, FoodInheritField, ImportLog, ImportRecipe, ImportIssue, Ingredient, InviteLink,
                              Keyword, MealPlan, MealType, NutritionInformation, Property,
                              PropertyType, Recipe, RecipeBook, RecipeBookEntry, RecipeImport,
                              ShareLink, ShoppingListEntry, ShoppingListRecipe, Space,
@@ -2234,3 +2234,41 @@ class IngredientParserRequestSerializer(serializers.Serializer):
 class IngredientParserResponseSerializer(serializers.Serializer):
     ingredient = IngredientSimpleSerializer(many=False, allow_null=True)
     ingredients = IngredientSimpleSerializer(many=True)
+
+
+class ImportIssueSerializer(serializers.ModelSerializer):
+
+    def create(self, validated_data):
+        validated_data['space'] = self.context['request'].space
+        return super().create(validated_data)
+
+    class Meta:
+        model = ImportIssue
+        fields = (
+            'id', 'import_recipe', 'issue_type', 'severity', 'message', 'field_name',
+            'original_value', 'suggested_value', 'resolved', 'created_at')
+
+
+class ImportRecipeSerializer(serializers.ModelSerializer):
+    issues = ImportIssueSerializer(many=True, read_only=True)
+    issue_count = serializers.SerializerMethodField()
+    unresolved_issue_count = serializers.SerializerMethodField()
+
+    def get_issue_count(self, obj):
+        return obj.issues.count()
+
+    def get_unresolved_issue_count(self, obj):
+        return obj.issues.filter(resolved=False).count()
+
+    def create(self, validated_data):
+        validated_data['created_by'] = self.context['request'].user
+        validated_data['space'] = self.context['request'].space
+        return super().create(validated_data)
+
+    class Meta:
+        model = ImportRecipe
+        fields = (
+            'id', 'name', 'import_log', 'source_url', 'recipe_data', 'image_url',
+            'status', 'issues', 'issue_count', 'unresolved_issue_count',
+            'created_at', 'updated_at', 'created_by')
+        read_only_fields = ('created_by',)

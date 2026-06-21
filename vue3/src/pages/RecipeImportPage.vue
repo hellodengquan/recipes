@@ -529,6 +529,10 @@
                                     </template>
                                     <template #next>
                                         <v-btn @click="resetImporter()" :disabled="loading">{{ $t('Reset') }}</v-btn>
+                                        <v-btn color="primary" variant="tonal" :to="{name: 'ImportReviewPage'}" :disabled="loading" class="ml-2">
+                                            <v-icon start icon="fa-solid fa-clipboard-check"></v-icon>
+                                            Go to Import Review
+                                        </v-btn>
                                     </template>
                                 </v-stepper-actions>
                             </v-stepper-window-item>
@@ -542,6 +546,9 @@
         <v-row dense>
             <v-col class="text-center">
                 <v-btn size="small" prepend-icon="fa-solid fa-arrow-rotate-left" variant="tonal" color="warning" @click="resetImporter()">{{ $t('Reset') }}</v-btn>
+                <v-btn size="small" prepend-icon="fa-solid fa-clipboard-check" variant="tonal" color="primary" :to="{name: 'ImportReviewPage'}" class="ml-2">
+                    Import Review
+                </v-btn>
             </v-col>
         </v-row>
     </v-container>

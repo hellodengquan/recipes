@@ -1745,3 +1745,79 @@ class CustomFilter(models.Model, PermissionModelMixin):
             models.UniqueConstraint(fields=['space', 'name'], name='cf_unique_name_per_space')
         ]
         ordering = ('pk',)
+
+
+class ImportRecipe(ExportModelOperationsMixin('import_recipe'), models.Model, PermissionModelMixin):
+    STATUS_PENDING = 'PENDING'
+    STATUS_APPROVED = 'APPROVED'
+    STATUS_REJECTED = 'REJECTED'
+
+    STATUS_CHOICES = (
+        (STATUS_PENDING, _('Pending')),
+        (STATUS_APPROVED, _('Approved')),
+        (STATUS_REJECTED, _('Rejected')),
+    )
+
+    name = models.CharField(max_length=128)
+    import_log = models.ForeignKey(ImportLog, null=True, blank=True, on_delete=models.CASCADE, related_name='import_recipes')
+    source_url = models.CharField(max_length=1024, default=None, blank=True, null=True)
+    recipe_data = models.JSONField(default=dict)
+    image_url = models.CharField(max_length=1024, default=None, blank=True, null=True)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE)
+
+    space = models.ForeignKey(Space, on_delete=models.CASCADE)
+    objects = ScopedManager(space='space')
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        ordering = ('-created_at', 'pk',)
+
+
+class ImportIssue(models.Model, PermissionModelMixin):
+    TYPE_UNIT_ERROR = 'UNIT_ERROR'
+    TYPE_FIELD_MISMATCH = 'FIELD_MISMATCH'
+    TYPE_MISSING_IMAGE = 'MISSING_IMAGE'
+    TYPE_DUPLICATE_FOOD = 'DUPLICATE_FOOD'
+    TYPE_OTHER = 'OTHER'
+
+    TYPE_CHOICES = (
+        (TYPE_UNIT_ERROR, _('Unit Recognition Error')),
+        (TYPE_FIELD_MISMATCH, _('Field Mismatch')),
+        (TYPE_MISSING_IMAGE, _('Missing Image')),
+        (TYPE_DUPLICATE_FOOD, _('Duplicate Ingredient')),
+        (TYPE_OTHER, _('Other Issue')),
+    )
+
+    SEVERITY_LOW = 'LOW'
+    SEVERITY_MEDIUM = 'MEDIUM'
+    SEVERITY_HIGH = 'HIGH'
+
+    SEVERITY_CHOICES = (
+        (SEVERITY_LOW, _('Low')),
+        (SEVERITY_MEDIUM, _('Medium')),
+        (SEVERITY_HIGH, _('High')),
+    )
+
+    import_recipe = models.ForeignKey(ImportRecipe, on_delete=models.CASCADE, related_name='issues')
+    issue_type = models.CharField(max_length=64, choices=TYPE_CHOICES)
+    severity = models.CharField(max_length=32, choices=SEVERITY_CHOICES, default=SEVERITY_MEDIUM)
+    message = models.TextField(default='')
+    field_name = models.CharField(max_length=128, blank=True, null=True, default=None)
+    original_value = models.TextField(blank=True, null=True, default=None)
+    suggested_value = models.TextField(blank=True, null=True, default=None)
+    resolved = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    space = models.ForeignKey(Space, on_delete=models.CASCADE)
+    objects = ScopedManager(space='space')
+
+    def __str__(self):
+        return f"{self.issue_type}: {self.message[:50]}"
+
+    class Meta:
+        ordering = ('-created_at', 'pk',)
