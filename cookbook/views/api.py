@@ -1769,10 +1769,11 @@ class RecipeViewSet(LoggingMixin, viewsets.ModelViewSet, DeleteRelationMixing):
     pagination_class = RecipePagination
 
     def get_queryset(self):
+        from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
         share = self.request.GET.get('share', None)
 
-        if self.detail:  # if detail request and not list, private condition is verified by permission class
-            if not share:  # filter for space only if not shared
+        if self.detail:
+            if not share:
                 self.queryset = self.queryset.with_rating(
                     self.request.user
                 ).with_last_cooked(
@@ -1805,9 +1806,10 @@ class RecipeViewSet(LoggingMixin, viewsets.ModelViewSet, DeleteRelationMixing):
 
             return super().get_queryset()
 
-        self.queryset = self.queryset.filter(
-            space=self.request.space).filter(
-            Q(private=False) | (Q(private=True) & (Q(created_by=self.request.user) | Q(shared=self.request.user))))
+        strategy = RecipeVisibilityStrategy(self.request.user, self.request.space, share_uuid=share)
+        self.queryset = strategy.filter_queryset(
+            self.queryset.filter(space=self.request.space)
+        )
 
         params = {x: self.request.GET.get(x) if len({**self.request.GET}[x]) == 1 else self.request.GET.getlist(x) for x
                   in list(self.request.GET)}
@@ -1931,19 +1933,24 @@ class RecipeViewSet(LoggingMixin, viewsets.ModelViewSet, DeleteRelationMixing):
     @extend_schema(responses=RecipeFlatSerializer(many=True))
     @decorators.action(detail=False, pagination_class=None, methods=['GET'], serializer_class=RecipeFlatSerializer, )
     def flat(self, request):
-        # TODO limit fields retrieved but .values() kills image
-        qs = Recipe.objects.filter(space=request.space).filter(Q(private=False) | (
-                Q(private=True) & (Q(created_by=self.request.user) | Q(shared=self.request.user)))).all()
+        from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
+        strategy = RecipeVisibilityStrategy(request.user, request.space)
+        qs = strategy.filter_queryset(Recipe.objects.filter(space=request.space)).all()
 
         return Response(self.serializer_class(qs, many=True).data)
 
     @decorators.action(detail=False, methods=['PUT'], serializer_class=RecipeBatchUpdateSerializer)
     def batch_update(self, request):
+        from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
         serializer = self.serializer_class(data=request.data, partial=True)
 
         if serializer.is_valid():
-            recipes = Recipe.objects.filter(id__in=serializer.validated_data['recipes'], space=self.request.space).filter(Q(private=False) | (Q(private=True) & (Q(created_by=self.request.user) | Q(shared=self.request.user))))
-            safe_recipe_ids = Recipe.objects.filter(id__in=serializer.validated_data['recipes'], space=self.request.space).filter(Q(private=False) | (Q(private=True) & (Q(created_by=self.request.user) | Q(shared=self.request.user)))).values_list('id', flat=True)
+            strategy = RecipeVisibilityStrategy(request.user, request.space)
+            visible_recipes = strategy.filter_queryset(
+                Recipe.objects.filter(id__in=serializer.validated_data['recipes'], space=self.request.space)
+            )
+            recipes = visible_recipes
+            safe_recipe_ids = visible_recipes.values_list('id', flat=True)
 
             if 'keywords_add' in serializer.validated_data:
                 keyword_relations = []

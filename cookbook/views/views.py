@@ -28,7 +28,7 @@ from drf_spectacular.views import SpectacularRedocView, SpectacularSwaggerView
 
 from cookbook.forms import Recipe, SpaceCreateForm, SpaceJoinForm, User, UserCreateForm
 from cookbook.helper.HelperFunctions import str2bool
-from cookbook.helper.permission_helper import CustomIsGuest, GroupRequiredMixin, has_group_permission, share_link_valid, switch_user_active_space
+from cookbook.helper.permission_helper import CustomIsGuest, GroupRequiredMixin, has_group_permission, switch_user_active_space
 from cookbook.models import InviteLink, ShareLink, Space, UserSpace
 from cookbook.templatetags.theming_tags import get_theming_values
 from cookbook.version_info import VERSION_INFO
@@ -152,10 +152,15 @@ def no_perm(request):
 
 
 def recipe_pdf_viewer(request, pk):
+    from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
     with scopes_disabled():
         recipe = get_object_or_404(Recipe, pk=pk)
-        if share_link_valid(recipe, request.GET.get('share', None)) or (has_group_permission(
-                request.user, ['guest']) and recipe.space == request.space):
+        strategy = RecipeVisibilityStrategy(
+            user=request.user,
+            space=getattr(request, 'space', recipe.space),
+            share_uuid=request.GET.get('share', None),
+        )
+        if strategy.can_view_recipe(recipe):
             return render(request, 'pdf_viewer.html', {'recipe_id': pk, 'share': request.GET.get('share', None)})
         return HttpResponseRedirect(reverse('index'))
 

@@ -384,30 +384,35 @@ class CustomIsShare(permissions.BasePermission):
 
 class CustomRecipePermission(permissions.BasePermission):
     """
-    Custom permission class for recipe api endpoint
+    Custom permission class for recipe api endpoint.
+
+    Delegates to :class:`RecipeVisibilityStrategy` so that the same rules
+    are shared between the DRF permission layer, the queryset filter layer,
+    and the Django template-view layer.
     """
     message = _('You do not have the required permissions to view this page!')
 
-    def has_permission(self, request, view):  # user is either at least a guest or a share link is given and the request is safe
+    def has_permission(self, request, view):
+        from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
+        strategy = RecipeVisibilityStrategy.from_request(request)
+        if not strategy.can_list():
+            return False
         share = request.query_params.get('share', None)
-        return ((has_group_permission(request.user, ['guest']) and request.method in SAFE_METHODS) or has_group_permission(
-            request.user, ['user'])) or (share and request.method in SAFE_METHODS and 'pk' in view.kwargs)
+        if share and 'pk' not in view.kwargs:
+            return False
+        return True
 
     def has_object_permission(self, request, view, obj):
-        share = request.query_params.get('share', None)
-        if share:
-            if share_link_valid(obj, share):
-                return True
-            # Invalid share link - check if user has normal access
-            # If not, raise 404 to avoid leaking recipe existence
+        from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
+        strategy = RecipeVisibilityStrategy.from_request(request)
+        if strategy.share_uuid and not share_link_valid(obj, strategy.share_uuid):
             if obj.space != request.space:
                 raise Http404()
-            # User is in same space, fall through to normal permission check
-        if obj.private:
-            return ((obj.created_by == request.user) or (request.user in obj.shared.all())) and obj.space == request.space
-        else:
-            return ((has_group_permission(request.user, ['guest']) and request.method in SAFE_METHODS)
-                    or has_group_permission(request.user, ['user'])) and obj.space == request.space
+        if request.method in SAFE_METHODS:
+            return strategy.can_view(obj)
+        if request.method == 'DELETE':
+            return strategy.can_delete(obj)
+        return strategy.can_edit(obj)
 
 
 class CustomAiProviderPermission(permissions.BasePermission):
