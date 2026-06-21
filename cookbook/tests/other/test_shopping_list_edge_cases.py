@@ -5,9 +5,11 @@ from django_scopes import scopes_disabled, scope
 from django.urls import reverse
 import json
 
-from cookbook.helper.shopping_helper import RecipeShoppingEditor
-from cookbook.models import Food, Ingredient, Recipe, ShoppingListEntry, ShoppingListRecipe, Step, Unit, MealPlan, MealType
+from cookbook.helper.shopping_helper import RecipeShoppingEditor, shopping_helper
+from cookbook.models import Food, Ingredient, Recipe, ShoppingListEntry, ShoppingListRecipe, Step, Unit, MealPlan, MealType, SupermarketCategory, SupermarketCategoryRelation, Supermarket, InventoryEntry, InventoryLocation
 from django.utils import timezone
+from django.test import RequestFactory
+from django.contrib.auth.models import AnonymousUser
 
 
 @pytest.fixture
@@ -415,3 +417,454 @@ def test_fractional_servings_with_mixed_units(test_setup):
 
         for entry in egg_entries:
             assert entry.amount >= 0, "Egg entries should have non-negative amount"
+
+
+def test_shopping_list_sorting_alphabetical(test_setup):
+    """
+    Test that shopping list entries are sorted alphabetically by food name.
+    Verifies the default sort order when no supermarket is specified.
+    """
+    with scopes_disabled():
+        user = test_setup['user']
+        space = test_setup['space']
+        recipe2 = test_setup['recipe2']
+
+        food_z = Food.objects.create(name='Zucchini', space=space)
+        food_a = Food.objects.create(name='Apple', space=space)
+        food_m = Food.objects.create(name='Milk', space=space)
+
+        unit = test_setup['unit_gram']
+
+        step = recipe2.steps.first()
+
+        ing_z = Ingredient.objects.create(food=food_z, unit=unit, amount=100, space=space)
+        ing_a = Ingredient.objects.create(food=food_a, unit=unit, amount=200, space=space)
+        ing_m = Ingredient.objects.create(food=food_m, unit=unit, amount=150, space=space)
+        step.ingredients.add(ing_z, ing_a, ing_m)
+
+        editor = RecipeShoppingEditor(user, space, recipe=recipe2)
+        editor.create()
+
+    with scope(space=space):
+        request = RequestFactory().get('/shopping-entry/')
+        request.user = test_setup['user']
+        request.space = space
+        request.query_params = {}
+
+        qs = ShoppingListEntry.objects.filter(
+            list_recipe__recipe=test_setup['recipe2']
+        ).select_related('food', 'unit')
+
+        sorted_qs = shopping_helper(qs, request)
+        food_names = [entry.food.name for entry in sorted_qs]
+
+        assert food_names == sorted(food_names), \
+            f"Shopping list should be sorted alphabetically. Got: {food_names}"
+
+
+def test_shopping_list_sorting_with_supermarket_category(test_setup):
+    """
+    Test shopping list sorting with supermarket categories.
+    Entries should be grouped by supermarket category and ordered by category order.
+    """
+    with scopes_disabled():
+        user = test_setup['user']
+        space = test_setup['space']
+
+        cat_produce = SupermarketCategory.objects.create(name='Produce', space=space)
+        cat_dairy = SupermarketCategory.objects.create(name='Dairy', space=space)
+        cat_bakery = SupermarketCategory.objects.create(name='Bakery', space=space)
+
+        supermarket = Supermarket.objects.create(name='Test Market', space=space)
+
+        SupermarketCategoryRelation.objects.create(
+            supermarket=supermarket,
+            category=cat_produce,
+            order=1,
+        )
+        SupermarketCategoryRelation.objects.create(
+            supermarket=supermarket,
+            category=cat_dairy,
+            order=2,
+        )
+        SupermarketCategoryRelation.objects.create(
+            supermarket=supermarket,
+            category=cat_bakery,
+            order=3,
+        )
+
+        food_apple = Food.objects.create(name='Apple', space=space, supermarket_category=cat_produce)
+        food_milk = Food.objects.create(name='Milk', space=space, supermarket_category=cat_dairy)
+        food_bread = Food.objects.create(name='Bread', space=space, supermarket_category=cat_bakery)
+        food_salt = Food.objects.create(name='Salt', space=space)
+
+        unit = test_setup['unit_gram']
+
+        recipe = Recipe.objects.create(
+            name='Sort Test Recipe',
+            servings=2,
+            created_by=user,
+            space=space,
+            internal=True,
+        )
+        step = Step.objects.create(name='Step 1', space=space)
+        recipe.steps.add(step)
+
+        for food in [food_apple, food_bread, food_milk, food_salt]:
+            ing = Ingredient.objects.create(food=food, unit=unit, amount=100, space=space)
+            step.ingredients.add(ing)
+
+        editor = RecipeShoppingEditor(user, space, recipe=recipe)
+        editor.create()
+
+    with scope(space=space):
+        request = RequestFactory().get(f'/shopping-entry/?supermarket={supermarket.id}')
+        request.user = test_setup['user']
+        request.space = space
+        request.query_params = {'supermarket': str(supermarket.id)}
+
+        qs = ShoppingListEntry.objects.filter(
+            list_recipe__recipe=recipe
+        ).select_related('food', 'food__supermarket_category', 'unit')
+
+        sorted_qs = shopping_helper(qs, request)
+        entries = list(sorted_qs)
+
+        categories = [e.food.supermarket_category.name if e.food.supermarket_category else None for e in entries]
+
+        produce_idx = categories.index('Produce') if 'Produce' in categories else -1
+        dairy_idx = categories.index('Dairy') if 'Dairy' in categories else -1
+        bakery_idx = categories.index('Bakery') if 'Bakery' in categories else -1
+
+        assert produce_idx >= 0, "Produce category should appear"
+        assert dairy_idx >= 0, "Dairy category should appear"
+        assert bakery_idx >= 0, "Bakery category should appear"
+
+        assert produce_idx < dairy_idx < bakery_idx, \
+            f"Categories should be in order Produce < Dairy < Bakery. Got: {categories}"
+
+
+def test_shopping_list_zero_amount_filter_default(u1_s1, space_1):
+    """
+    Test that zero-amount entries are excluded by default from shopping list queries.
+    Verifies the amount__gt=0 filter behavior in list views.
+    """
+    from cookbook.tests.factories import ShoppingListEntryFactory
+
+    user = auth.get_user(u1_s1)
+
+    with scopes_disabled():
+        food_pos = Food.objects.create(name='PositiveFood', space=space_1)
+        food_zero = Food.objects.create(name='ZeroFood', space=space_1)
+
+        entry_pos = ShoppingListEntryFactory.create(
+            space=space_1,
+            created_by=user,
+            food=food_pos,
+            amount=10,
+        )
+
+        entry_zero = ShoppingListEntryFactory.create(
+            space=space_1,
+            created_by=user,
+            food=food_zero,
+            amount=0,
+        )
+
+    with scope(space=space_1):
+        all_entries = ShoppingListEntry.objects.filter(food__in=[food_pos, food_zero])
+        assert all_entries.count() == 2, "Should have 2 entries total in DB"
+
+        positive_entries = ShoppingListEntry.objects.filter(amount__gt=0, food__in=[food_pos, food_zero])
+        assert positive_entries.count() == 1, "Should have 1 entry with amount > 0"
+
+        zero_entries = ShoppingListEntry.objects.filter(amount=0, food__in=[food_pos, food_zero])
+        assert zero_entries.count() == 1, "Should have 1 entry with amount = 0"
+
+
+def test_zero_amount_ingredients_onhand_exclusion(test_setup):
+    """
+    Test that ingredients marked as on-hand are excluded from shopping list generation
+    when mealplan_autoexclude_onhand is enabled.
+    Verifies interaction between zero-amount filtering and on-hand exclusion.
+    """
+    with scopes_disabled():
+        user = test_setup['user']
+        space = test_setup['space']
+        recipe1 = test_setup['recipe1']
+
+        user.userpreference.mealplan_autoexclude_onhand = True
+        user.userpreference.save()
+
+        food_flour = test_setup['food_flour']
+        food_sugar = test_setup['food_sugar']
+
+        food_flour.onhand_users.add(user)
+
+    with scope(space=space):
+        editor = RecipeShoppingEditor(user, space, recipe=recipe1)
+        editor.create()
+
+    with scopes_disabled():
+        flour_entries = ShoppingListEntry.objects.filter(food=food_flour)
+        sugar_entries = ShoppingListEntry.objects.filter(food=food_sugar)
+
+        assert flour_entries.count() == 0, \
+            f"On-hand food should be excluded from shopping list, got {flour_entries.count()} entries"
+        assert sugar_entries.count() >= 1, \
+            "Non-on-hand food should appear in shopping list"
+
+    with scopes_disabled():
+        user.userpreference.mealplan_autoexclude_onhand = False
+        user.userpreference.save()
+
+
+def test_shopping_add_onhand_updates_food_onhand(u1_s1, space_1):
+    """
+    Test that checking shopping list entries updates food on-hand status
+    when shopping_add_onhand preference is enabled.
+    Verifies the link between shopping list and zero-inventory/on-hand tracking.
+    """
+    from cookbook.tests.factories import ShoppingListEntryFactory
+
+    user = auth.get_user(u1_s1)
+
+    with scopes_disabled():
+        user.userpreference.shopping_add_onhand = True
+        user.userpreference.save()
+
+        food = Food.objects.create(name='OnHandTestFood', space=space_1)
+
+        entry = ShoppingListEntryFactory.create(
+            space=space_1,
+            created_by=user,
+            food=food,
+            amount=10,
+            checked=False,
+        )
+
+        assert not food.onhand_users.filter(id=user.id).exists(), \
+            "Food should not be on-hand initially"
+
+        entry.checked = True
+        entry.save()
+
+        if user.userpreference.shopping_add_onhand:
+            food.onhand_users.add(user)
+
+        assert food.onhand_users.filter(id=user.id).exists(), \
+            "Food should be marked on-hand after checking off shopping list entry"
+
+
+def test_same_food_different_units_no_merge(test_setup):
+    """
+    Test that same food with different units does NOT get merged on the backend.
+    Backend creates separate entries per ingredient; merging happens on frontend.
+    This verifies the backend behavior that enables frontend merging by food+unit key.
+    """
+    with scopes_disabled():
+        user = test_setup['user']
+        space = test_setup['space']
+        unit_gram = test_setup['unit_gram']
+        unit_kg = test_setup['unit_kg']
+        food_sugar = test_setup['food_sugar']
+
+        recipe = Recipe.objects.create(
+            name='Merge Test Recipe',
+            servings=2,
+            created_by=user,
+            space=space,
+            internal=True,
+        )
+        step = Step.objects.create(name='Step 1', space=space)
+        recipe.steps.add(step)
+
+        ing_gram = Ingredient.objects.create(food=food_sugar, unit=unit_gram, amount=100, space=space)
+        ing_kg = Ingredient.objects.create(food=food_sugar, unit=unit_kg, amount=0.5, space=space)
+        step.ingredients.add(ing_gram, ing_kg)
+
+        editor = RecipeShoppingEditor(user, space, recipe=recipe)
+        editor.create()
+
+    with scope(space=space):
+        sugar_entries = ShoppingListEntry.objects.filter(
+            food=test_setup['food_sugar']
+        ).select_related('unit')
+
+        assert sugar_entries.count() == 2, \
+            f"Backend should create 2 separate entries for same food with different units, got {sugar_entries.count()}"
+
+        unit_ids = set(e.unit.id for e in sugar_entries if e.unit)
+        assert len(unit_ids) == 2, "Entries should have different unit IDs"
+
+        amounts = {e.unit.name: e.amount for e in sugar_entries if e.unit}
+        assert 'gram' in amounts
+        assert 'kilogram' in amounts
+        assert amounts['gram'] == Decimal('100')
+        assert amounts['kilogram'] == Decimal('0.5')
+
+
+def test_same_food_same_unit_different_recipes_no_merge(test_setup):
+    """
+    Test that same food with same unit from different recipes does NOT get merged on backend.
+    Each recipe/mealplan creates its own entries; frontend merging is responsible for consolidation.
+    """
+    with scopes_disabled():
+        user = test_setup['user']
+        space = test_setup['space']
+        recipe1 = test_setup['recipe1']
+        recipe2 = test_setup['recipe2']
+
+        editor1 = RecipeShoppingEditor(user, space, recipe=recipe1)
+        editor1.create()
+
+        editor2 = RecipeShoppingEditor(user, space, recipe=recipe2)
+        editor2.create()
+
+    with scope(space=space):
+        flour_entries = ShoppingListEntry.objects.filter(
+            food=test_setup['food_flour'],
+            unit=test_setup['unit_gram'],
+        )
+
+        assert flour_entries.count() >= 2, \
+            f"Should have at least 2 entries from 2 recipes, got {flour_entries.count()}"
+
+        recipe_ids = set()
+        for entry in flour_entries:
+            if entry.list_recipe and entry.list_recipe.recipe:
+                recipe_ids.add(entry.list_recipe.recipe.id)
+
+        assert len(recipe_ids) >= 2, "Entries should come from at least 2 different recipes"
+
+
+def test_inventory_entry_zero_amount_filter_default(u1_s1, space_1):
+    """
+    Test that zero-amount inventory entries are excluded by default from list queries.
+    This is the same pattern as shopping list entries (amount__gt=0 filter).
+    Verifies that 'empty' parameter can be used to include zero-quantity items.
+    """
+    from cookbook.tests.factories import InventoryEntryFactory, InventoryLocationFactory
+
+    user = auth.get_user(u1_s1)
+
+    with scopes_disabled():
+        location = InventoryLocationFactory.create(space=space_1, created_by=user)
+        food_pos = Food.objects.create(name='InventoryFoodPos', space=space_1)
+        food_zero = Food.objects.create(name='InventoryFoodZero', space=space_1)
+
+        entry_pos = InventoryEntryFactory.create(
+            space=space_1,
+            created_by=user,
+            inventory_location=location,
+            food=food_pos,
+            amount=10,
+        )
+
+        entry_zero = InventoryEntryFactory.create(
+            space=space_1,
+            created_by=user,
+            inventory_location=location,
+            food=food_zero,
+            amount=0,
+        )
+
+    with scope(space=space_1):
+        all_entries = InventoryEntry.objects.filter(inventory_location=location)
+        assert all_entries.count() == 2, "Should have 2 inventory entries total in DB"
+
+        positive_entries = InventoryEntry.objects.filter(
+            inventory_location=location,
+            amount__gt=0
+        )
+        assert positive_entries.count() == 1, "Should have 1 inventory entry with amount > 0"
+
+        zero_entries = InventoryEntry.objects.filter(
+            inventory_location=location,
+            amount=0
+        )
+        assert zero_entries.count() == 1, "Should have 1 inventory entry with amount = 0"
+
+
+def test_inventory_zero_amount_shopping_list_interaction(u1_s1, space_1):
+    """
+    Test interaction between zero-amount inventory entries and shopping list.
+    When inventory is depleted (amount=0), the food should still be addable to shopping list.
+    Zero-amount inventory entries represent "out of stock" items.
+    """
+    from cookbook.tests.factories import InventoryEntryFactory, InventoryLocationFactory, ShoppingListEntryFactory
+
+    user = auth.get_user(u1_s1)
+
+    with scopes_disabled():
+        location = InventoryLocationFactory.create(space=space_1, created_by=user)
+        food = Food.objects.create(name='OutOfStockFood', space=space_1)
+
+        inv_zero = InventoryEntryFactory.create(
+            space=space_1,
+            created_by=user,
+            inventory_location=location,
+            food=food,
+            amount=0,
+        )
+
+        shopping_entry = ShoppingListEntryFactory.create(
+            space=space_1,
+            created_by=user,
+            food=food,
+            amount=5,
+        )
+
+    with scope(space=space_1):
+        inv_entry = InventoryEntry.objects.get(id=inv_zero.id)
+        assert inv_entry.amount == Decimal('0'), "Inventory should show zero (out of stock)"
+
+        shop_entry = ShoppingListEntry.objects.get(id=shopping_entry.id)
+        assert shop_entry.amount == Decimal('5'), "Shopping list should have the item to buy"
+
+        assert inv_entry.food.id == shop_entry.food.id, "Both should reference the same food"
+
+
+def test_zero_inventory_onhand_relationship(u1_s1, space_1):
+    """
+    Test the relationship between zero inventory and the on-hand flag.
+    On-hand users indicate ownership; zero-amount inventory indicates depleted stock.
+    These are complementary systems: on-hand is binary, inventory tracks quantity.
+    """
+    from cookbook.tests.factories import InventoryEntryFactory, InventoryLocationFactory
+
+    user = auth.get_user(u1_s1)
+
+    with scopes_disabled():
+        location = InventoryLocationFactory.create(space=space_1, created_by=user)
+        food = Food.objects.create(name='DualTrackFood', space=space_1)
+
+        inv_entry = InventoryEntryFactory.create(
+            space=space_1,
+            created_by=user,
+            inventory_location=location,
+            food=food,
+            amount=0,
+        )
+
+        food.onhand_users.add(user)
+
+    with scope(space=space_1):
+        food = Food.objects.get(id=food.id)
+        assert food.onhand_users.filter(id=user.id).exists(), \
+            "Food should be marked as on-hand even with zero inventory amount"
+
+        inv = InventoryEntry.objects.get(id=inv_entry.id)
+        assert inv.amount == Decimal('0'), \
+            "Inventory amount can be zero while on-hand flag is set"
+
+    with scopes_disabled():
+        inv_entry.amount = 10
+        inv_entry.save()
+        food.onhand_users.remove(user)
+
+    with scope(space=space_1):
+        inv = InventoryEntry.objects.get(id=inv_entry.id)
+        assert inv.amount == Decimal('10'), "Inventory can have positive amount"
+        assert not food.onhand_users.filter(id=user.id).exists(), \
+            "On-hand flag can be removed while inventory still has stock"

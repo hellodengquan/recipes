@@ -1,9 +1,10 @@
 import pytest
 from django.contrib import auth
 from django.test import RequestFactory
-from django_scopes import scope
+from django_scopes import scope, scopes_disabled
 
 from cookbook.helper.ingredient_parser import IngredientParser
+from cookbook.models import Unit, Food, Ingredient
 
 
 @pytest.mark.parametrize("arg", [
@@ -154,3 +155,141 @@ def test_ingredient_parser_integer_fraction_mixed(u1_s1):
             assert abs(parsed[0] - val[0]) < 0.0001, f"Amount mismatch for '{key}': expected {val[0]}, got {parsed[0]}"
             assert parsed[1] == val[1], f"Unit mismatch for '{key}': expected {val[1]}, got {parsed[1]}"
             assert parsed[2] == val[2], f"Food mismatch for '{key}': expected {val[2]}, got {parsed[2]}"
+
+
+def test_ingredient_parser_end_to_end_unit_fallback(u1_s1):
+    """
+    End-to-end test for unit dictionary fallback using real IngredientParser.
+    Verifies that unknown units are properly created as fallback instead of crashing.
+    Tests the full parse_as_ingredient flow: parse -> get_unit -> get_food.
+    """
+    user = auth.get_user(u1_s1)
+    space = user.userspace_set.first().space
+    request = RequestFactory()
+    request.user = user
+    request.space = space
+
+    with scopes_disabled():
+        Unit.objects.filter(space=space, name='pinch').delete()
+        Unit.objects.filter(space=space, name='dash').delete()
+        Unit.objects.filter(space=space, name='handful').delete()
+        Food.objects.filter(space=space, name='Salt').delete()
+        Food.objects.filter(space=space, name='Pepper').delete()
+        Food.objects.filter(space=space, name='Peanuts').delete()
+
+    ingredient_parser = IngredientParser(request, False, ignore_automations=True)
+
+    with scope(space=space):
+        test_cases = [
+            ("1 pinch Salt", 1.0, "pinch", "Salt"),
+            ("2 dash Pepper", 2.0, "dash", "Pepper"),
+            ("3 handful Peanuts", 3.0, "handful", "Peanuts"),
+        ]
+
+        for text, expected_amount, expected_unit_name, expected_food_name in test_cases:
+            ingredient = ingredient_parser.parse_as_ingredient(text)
+
+            assert ingredient is not None, f"Failed to parse '{text}'"
+            assert abs(ingredient.amount - expected_amount) < 0.0001, \
+                f"Amount mismatch for '{text}': expected {expected_amount}, got {ingredient.amount}"
+
+            assert ingredient.unit is not None, f"Unit should not be None for '{text}'"
+            assert ingredient.unit.name == expected_unit_name, \
+                f"Unit name mismatch for '{text}': expected {expected_unit_name}, got {ingredient.unit.name}"
+            assert ingredient.unit.space == space, "Unit should be in the correct space"
+
+            assert ingredient.food is not None, f"Food should not be None for '{text}'"
+            assert ingredient.food.name == expected_food_name, \
+                f"Food name mismatch for '{text}': expected {expected_food_name}, got {ingredient.food.name}"
+            assert ingredient.food.space == space, "Food should be in the correct space"
+
+
+def test_ingredient_parser_end_to_end_unknown_unit_persistence(u1_s1):
+    """
+    End-to-end test verifying that unknown units created by the parser persist in the database
+    and can be reused in subsequent parses (fallback unit dictionary behavior).
+    """
+    user = auth.get_user(u1_s1)
+    space = user.userspace_set.first().space
+    request = RequestFactory()
+    request.user = user
+    request.space = space
+
+    unique_unit_name = "test_unique_unit_xyz"
+    unique_food_name = "UniqueTestFoodABC"
+
+    with scopes_disabled():
+        Unit.objects.filter(space=space, name=unique_unit_name).delete()
+        Food.objects.filter(space=space, name=unique_food_name).delete()
+
+    ingredient_parser = IngredientParser(request, False, ignore_automations=True)
+
+    with scope(space=space):
+        first_parse = ingredient_parser.parse_as_ingredient(f"5 {unique_unit_name} {unique_food_name}")
+        first_unit_id = first_parse.unit.id
+        first_food_id = first_parse.food.id
+
+        assert first_parse.unit.name == unique_unit_name
+        assert first_parse.food.name == unique_food_name
+
+        second_parse = ingredient_parser.parse_as_ingredient(f"3 {unique_unit_name} {unique_food_name}")
+
+        assert second_parse.unit.id == first_unit_id, \
+            "Second parse should reuse the same unit object (fallback dictionary)"
+        assert second_parse.food.id == first_food_id, \
+            "Second parse should reuse the same food object"
+
+        assert abs(second_parse.amount - 3.0) < 0.0001
+
+
+def test_ingredient_parser_end_to_end_no_unit_fallback(u1_s1):
+    """
+    End-to-end test for ingredients without units - verify fallback behavior.
+    When no unit is detected, ingredient.unit should be None but food should still be created.
+    """
+    user = auth.get_user(u1_s1)
+    space = user.userspace_set.first().space
+    request = RequestFactory()
+    request.user = user
+    request.space = space
+
+    unique_food = "NoUnitTestFoodXYZ"
+
+    with scopes_disabled():
+        Food.objects.filter(space=space, name=unique_food).delete()
+
+    ingredient_parser = IngredientParser(request, False, ignore_automations=True)
+
+    with scope(space=space):
+        ingredient = ingredient_parser.parse_as_ingredient(f"3 {unique_food}")
+
+        assert ingredient.food is not None
+        assert ingredient.food.name == unique_food
+        assert ingredient.unit is None, "Ingredient without unit should have unit=None"
+        assert abs(ingredient.amount - 3.0) < 0.0001
+
+
+def test_ingredient_parser_end_to_end_zero_amount_fallback(u1_s1):
+    """
+    End-to-end test for zero-amount ingredients (no amount specified).
+    Verifies fallback behavior when parser can't extract a numeric amount.
+    """
+    user = auth.get_user(u1_s1)
+    space = user.userspace_set.first().space
+    request = RequestFactory()
+    request.user = user
+    request.space = space
+
+    food_name = "ZeroAmountTestFood"
+
+    with scopes_disabled():
+        Food.objects.filter(space=space, name=food_name).delete()
+
+    ingredient_parser = IngredientParser(request, False, ignore_automations=True)
+
+    with scope(space=space):
+        ingredient = ingredient_parser.parse_as_ingredient(f"etwas {food_name}")
+
+        assert ingredient.food is not None
+        assert ingredient.amount == 0, "Zero-amount ingredient should have amount=0"
+        assert ingredient.unit is None
