@@ -3467,20 +3467,25 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
             'ids': serializers.ListField(child=IntegerField()),
             'original_unit': serializers.CharField(),
             'target_unit_id': IntegerField(),
+            'use_fuzzy': serializers.BooleanField(required=False),
         }),
         responses=None,
     )
     @decorators.action(detail=False, methods=['post'], url_path='batch-update-unit')
     def batch_update_unit(self, request):
+        from cookbook.helper.import_review_helper import UnitRecognitionHelper
         ids = request.data.get('ids', [])
         original_unit = request.data.get('original_unit', '')
         target_unit_id = request.data.get('target_unit_id')
+        use_fuzzy = request.data.get('use_fuzzy', True)
         try:
             target_unit = Unit.objects.get(id=target_unit_id, space=request.space)
         except Unit.DoesNotExist:
             return Response({'error': 'Target unit not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        unit_helper = UnitRecognitionHelper(space=request.space)
         updated_count = 0
+        resolved_issue_count = 0
         recipes = self.get_queryset().filter(id__in=ids)
         for import_recipe in recipes:
             recipe_data = import_recipe.recipe_data
@@ -3488,32 +3493,60 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
                 for step in recipe_data['steps']:
                     if 'ingredients' in step:
                         for ing in step['ingredients']:
-                            if ing.get('unit') and (ing['unit'].get('name') == original_unit or ing['unit'].get('id') == original_unit):
+                            unit_info = ing.get('unit')
+                            if not unit_info:
+                                continue
+                            unit_name = unit_info.get('name', '') if isinstance(unit_info, dict) else str(unit_info)
+                            if not unit_name:
+                                continue
+                            is_match = (unit_name == original_unit)
+                            if not is_match and use_fuzzy:
+                                recognition = unit_helper.recognize_unit(unit_name)
+                                if recognition and recognition.get('canonical') == original_unit:
+                                    is_match = True
+                                elif recognition and recognition.get('match_method') in ('edit_distance', 'trigram'):
+                                    normalized_orig = original_unit.lower().strip()
+                                    normalized_current = unit_name.lower().strip()
+                                    from cookbook.helper.import_review_helper import normalized_levenshtein_ratio
+                                    if normalized_levenshtein_ratio(normalized_orig, normalized_current) >= unit_helper.LEVENSHTEIN_THRESHOLD:
+                                        is_match = True
+                            if is_match:
                                 ing['unit'] = {'id': target_unit.id, 'name': target_unit.name}
                                 updated_count += 1
             import_recipe.recipe_data = recipe_data
             import_recipe.save()
-        return Response({'updated_count': updated_count})
+            resolved = import_recipe.issues.filter(
+                issue_type=ImportIssue.TYPE_UNIT_ERROR,
+                original_value=original_unit,
+                resolved=False,
+            ).update(resolved=True)
+            resolved_issue_count += resolved
+        return Response({'updated_count': updated_count, 'resolved_issues': resolved_issue_count})
 
     @extend_schema(
         request=inline_serializer(name="ImportRecipeMergeFoodSerializer", fields={
             'ids': serializers.ListField(child=IntegerField()),
             'original_food_names': serializers.ListField(child=serializers.CharField()),
             'target_food_id': IntegerField(),
+            'use_fuzzy': serializers.BooleanField(required=False),
         }),
         responses=None,
     )
     @decorators.action(detail=False, methods=['post'], url_path='batch-merge-food')
     def batch_merge_food(self, request):
+        from cookbook.helper.import_review_helper import FoodDeduplicationHelper
         ids = request.data.get('ids', [])
         original_food_names = request.data.get('original_food_names', [])
         target_food_id = request.data.get('target_food_id')
+        use_fuzzy = request.data.get('use_fuzzy', True)
         try:
             target_food = Food.objects.get(id=target_food_id, space=request.space)
         except Food.DoesNotExist:
             return Response({'error': 'Target food not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        food_helper = FoodDeduplicationHelper(space=request.space)
         updated_count = 0
+        resolved_issue_count = 0
         recipes = self.get_queryset().filter(id__in=ids)
         for import_recipe in recipes:
             recipe_data = import_recipe.recipe_data
@@ -3521,16 +3554,36 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
                 for step in recipe_data['steps']:
                     if 'ingredients' in step:
                         for ing in step['ingredients']:
-                            if ing.get('food') and ing['food'].get('name') in original_food_names:
+                            food_info = ing.get('food')
+                            if not food_info:
+                                continue
+                            food_name = food_info.get('name', '') if isinstance(food_info, dict) else str(food_info)
+                            if not food_name:
+                                continue
+                            is_match = food_name in original_food_names
+                            if not is_match and use_fuzzy:
+                                for orig_name in original_food_names:
+                                    if food_helper._is_likely_variant(food_name, orig_name):
+                                        is_match = True
+                                        break
+                            if is_match:
                                 ing['food'] = {'id': target_food.id, 'name': target_food.name}
                                 updated_count += 1
             import_recipe.recipe_data = recipe_data
             import_recipe.save()
-        return Response({'updated_count': updated_count})
+            for orig_name in original_food_names:
+                resolved = import_recipe.issues.filter(
+                    issue_type=ImportIssue.TYPE_DUPLICATE_FOOD,
+                    original_value__contains=orig_name,
+                    resolved=False,
+                ).update(resolved=True)
+                resolved_issue_count += resolved
+        return Response({'updated_count': updated_count, 'resolved_issues': resolved_issue_count})
 
     @extend_schema(
         request=inline_serializer(name="ImportRecipeImageUpdateSerializer", fields={
             'ids': serializers.ListField(child=IntegerField()),
+            'strategy': serializers.CharField(required=False),
             'image_url': serializers.CharField(required=False),
             'image_file_id': IntegerField(required=False),
         }),
@@ -3538,22 +3591,109 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
     )
     @decorators.action(detail=False, methods=['post'], url_path='batch-update-image')
     def batch_update_image(self, request):
+        from cookbook.helper.import_review_helper import ImageSourceHelper
         ids = request.data.get('ids', [])
+        strategy = request.data.get('strategy', 'manual')
         image_url = request.data.get('image_url')
         image_file_id = request.data.get('image_file_id')
 
-        recipes = self.get_queryset().filter(id__in=ids)
+        image_helper = ImageSourceHelper(space=request.space)
         updated_count = 0
+        resolved_issue_count = 0
+        recipes = self.get_queryset().filter(id__in=ids)
         for import_recipe in recipes:
-            if image_url:
-                import_recipe.image_url = image_url
+            applied_url = image_url
+            if strategy == 'api_fetch' and not applied_url and import_recipe.source_url:
+                result = image_helper.fetch_image_from_source_page(import_recipe.source_url)
+                if result.get('success'):
+                    applied_url = result['image_url']
+            elif strategy == 'placeholder' and not applied_url:
+                applied_url = '/static/placeholder_recipe.png'
+
+            if applied_url:
+                import_recipe.image_url = applied_url
             if image_file_id:
                 recipe_data = import_recipe.recipe_data
                 recipe_data['image_file_id'] = image_file_id
                 import_recipe.recipe_data = recipe_data
             import_recipe.save()
             updated_count += 1
-        return Response({'updated_count': updated_count})
+            resolved = import_recipe.issues.filter(
+                issue_type=ImportIssue.TYPE_MISSING_IMAGE,
+                resolved=False,
+            ).update(resolved=True)
+            resolved_issue_count += resolved
+        return Response({'updated_count': updated_count, 'resolved_issues': resolved_issue_count})
+
+    @extend_schema(
+        request=inline_serializer(name="ImportRecipeFetchImageSerializer", fields={
+            'ids': serializers.ListField(child=IntegerField()),
+        }),
+        responses=None,
+    )
+    @decorators.action(detail=False, methods=['post'], url_path='fetch-images')
+    def fetch_images(self, request):
+        from cookbook.helper.import_review_helper import ImageSourceHelper
+        ids = request.data.get('ids', [])
+        image_helper = ImageSourceHelper(space=request.space)
+        results = []
+        recipes = self.get_queryset().filter(id__in=ids)
+        for import_recipe in recipes:
+            if import_recipe.image_url:
+                results.append({
+                    'id': import_recipe.id,
+                    'name': import_recipe.name,
+                    'status': 'skipped',
+                    'reason': 'already_has_image',
+                })
+                continue
+            fetched_url = None
+            if import_recipe.source_url:
+                fetch_result = image_helper.fetch_image_from_source_page(import_recipe.source_url)
+                if fetch_result.get('success'):
+                    fetched_url = fetch_result['image_url']
+                    import_recipe.image_url = fetched_url
+                    import_recipe.issues.filter(
+                        issue_type=ImportIssue.TYPE_MISSING_IMAGE,
+                        resolved=False,
+                    ).update(resolved=True)
+                    import_recipe.save()
+            results.append({
+                'id': import_recipe.id,
+                'name': import_recipe.name,
+                'status': 'fetched' if fetched_url else 'failed',
+                'image_url': fetched_url,
+            })
+        return Response({'results': results})
+
+    @extend_schema(
+        request=inline_serializer(name="ImportRecipeRescanSerializer", fields={
+            'ids': serializers.ListField(child=IntegerField()),
+        }),
+        responses=None,
+    )
+    @decorators.action(detail=False, methods=['post'], url_path='rescan')
+    def rescan(self, request):
+        from cookbook.helper.import_review_helper import scan_import_recipe
+        ids = request.data.get('ids', [])
+        recipes = self.get_queryset().filter(id__in=ids)
+        total_issues = 0
+        for import_recipe in recipes:
+            import_recipe.issues.all().delete()
+            issues = scan_import_recipe(import_recipe, space=request.space)
+            for issue_data in issues:
+                ImportIssue.objects.create(
+                    import_recipe=import_recipe,
+                    issue_type=issue_data['issue_type'],
+                    severity=issue_data.get('severity', 'MEDIUM'),
+                    message=issue_data.get('message', ''),
+                    field_name=issue_data.get('field_name'),
+                    original_value=issue_data.get('original_value'),
+                    suggested_value=issue_data.get('suggested_value'),
+                    space=request.space,
+                )
+            total_issues += len(issues)
+        return Response({'scanned_recipes': len(ids), 'total_issues': total_issues})
 
     def _convert_to_recipe(self, import_recipe, user):
         try:

@@ -13,6 +13,10 @@
                             <v-icon start icon="$refresh"></v-icon>
                             Refresh
                         </v-btn>
+                        <v-btn size="small" variant="tonal" color="info" :disabled="selectedIds.length === 0" @click="rescanSelected" :loading="loadingAction">
+                            <v-icon start icon="fa-solid fa-magnifying-glass"></v-icon>
+                            Rescan
+                        </v-btn>
                         <v-spacer></v-spacer>
                         <v-chip color="primary" variant="tonal">
                             Pending: {{ pendingCount }}
@@ -68,6 +72,10 @@
                         <v-btn size="small" variant="tonal" color="secondary" :disabled="selectedIds.length === 0" @click="dialogImageFix = true">
                             <v-icon start icon="fa-solid fa-image"></v-icon>
                             Set Images
+                        </v-btn>
+                        <v-btn size="small" variant="tonal" color="accent" :disabled="selectedIds.length === 0" @click="fetchImagesForSelected" :loading="loadingAction">
+                            <v-icon start icon="fa-solid fa-download"></v-icon>
+                            Fetch Images
                         </v-btn>
                         <v-spacer></v-spacer>
                         <v-btn size="small" variant="tonal" @click="toggleSelectAll">
@@ -184,7 +192,7 @@
                                                                     variant="outlined"
                                                                     class="ma-1">
                                                                     <span v-if="ing.amount">{{ ing.amount }}</span>
-                                                                    <span v-if="ing.unit?.name" class="ml-1">{{ ing.unit.name }}</span>
+                                                                    <span v-if="ing.unit?.name" class="ml-1" :class="getUnitMatchClass(item, ing.unit.name)">{{ ing.unit.name }}</span>
                                                                     <span v-if="ing.food?.name" class="ml-1 font-weight-medium">{{ ing.food.name }}</span>
                                                                     <span v-if="ing.note" class="ml-1 text-medium-emphasis">({{ ing.note }})</span>
                                                                 </v-chip>
@@ -242,7 +250,7 @@
                 <v-closable-card-title v-model="dialogUnitFix" title="Bulk Fix Units"></v-closable-card-title>
                 <v-card-text>
                     <v-alert variant="tonal" type="info" class="mb-4">
-                        Replace a unit name across all selected recipes.
+                        Replace a unit name across all selected recipes. When fuzzy matching is enabled, similar unit names (e.g. "tblsp" vs "tbsp") will also be matched.
                     </v-alert>
                     <v-text-field
                         v-model="unitFix.original"
@@ -258,6 +266,7 @@
                         append-to-body
                         :disabled="loadingAction">
                     </model-select>
+                    <v-checkbox v-model="unitFix.useFuzzy" label="Enable fuzzy matching (edit distance)" hide-details class="mt-2"></v-checkbox>
                 </v-card-text>
                 <v-card-actions>
                     <v-spacer></v-spacer>
@@ -274,7 +283,7 @@
                 <v-closable-card-title v-model="dialogMergeFood" title="Bulk Merge Ingredients"></v-closable-card-title>
                 <v-card-text>
                     <v-alert variant="tonal" type="info" class="mb-4">
-                        Merge multiple ingredient names into a single food item across all selected recipes.
+                        Merge multiple ingredient names into a single food item across all selected recipes. Fuzzy matching detects variants like "tomato" / "tomatoes" / "fresh tomato".
                     </v-alert>
                     <v-combobox
                         v-model="foodMerge.originals"
@@ -293,6 +302,7 @@
                         :disabled="loadingAction"
                         class="mt-4">
                     </model-select>
+                    <v-checkbox v-model="foodMerge.useFuzzy" label="Enable fuzzy matching (variant detection)" hide-details class="mt-2"></v-checkbox>
                 </v-card-text>
                 <v-card-actions>
                     <v-spacer></v-spacer>
@@ -304,20 +314,32 @@
             </v-card>
         </v-dialog>
 
-        <v-dialog v-model="dialogImageFix" max-width="600px">
+        <v-dialog v-model="dialogImageFix" max-width="700px">
             <v-card>
                 <v-closable-card-title v-model="dialogImageFix" title="Bulk Set Recipe Images"></v-closable-card-title>
                 <v-card-text>
                     <v-alert variant="tonal" type="info" class="mb-4">
-                        Set a default image URL for all selected recipes that are missing images.
+                        Choose how to set images for recipes that are missing them.
                     </v-alert>
+                    <v-radio-group v-model="imageFix.strategy" inline>
+                        <v-radio label="Manual URL" value="manual"></v-radio>
+                        <v-radio label="Fetch from source page" value="api_fetch"></v-radio>
+                        <v-radio label="Use placeholder" value="placeholder"></v-radio>
+                    </v-radio-group>
                     <v-text-field
+                        v-if="imageFix.strategy === 'manual'"
                         v-model="imageFix.url"
                         label="Image URL"
                         placeholder="https://..."
                         :disabled="loadingAction">
                     </v-text-field>
-                    <div v-if="imageFix.url" class="mt-4">
+                    <v-alert v-if="imageFix.strategy === 'api_fetch'" variant="tonal" type="info" density="compact">
+                        Will attempt to fetch og:image or first &lt;img&gt; from each recipe's source page.
+                    </v-alert>
+                    <v-alert v-if="imageFix.strategy === 'placeholder'" variant="tonal" type="info" density="compact">
+                        Will set a default placeholder image URL for all selected recipes.
+                    </v-alert>
+                    <div v-if="imageFix.strategy === 'manual' && imageFix.url" class="mt-4">
                         <div class="text-caption mb-2">Preview:</div>
                         <v-img :src="imageFix.url" max-height="150" cover class="rounded"></v-img>
                     </div>
@@ -325,7 +347,7 @@
                 <v-card-actions>
                     <v-spacer></v-spacer>
                     <v-btn @click="dialogImageFix = false" variant="tonal" :disabled="loadingAction">Cancel</v-btn>
-                    <v-btn color="primary" @click="applyImageFix" :loading="loadingAction" :disabled="!imageFix.url">
+                    <v-btn color="primary" @click="applyImageFix" :loading="loadingAction" :disabled="imageFix.strategy === 'manual' && !imageFix.url">
                         Apply to {{ selectedIds.length }} recipes
                     </v-btn>
                 </v-card-actions>
@@ -373,7 +395,7 @@
 
 import {computed, onMounted, ref} from "vue";
 import {ApiApi, Food, ImportRecipe, Unit} from "@/openapi";
-import {useMessageStore, MessageType, PreparedMessage} from "@/stores/MessageStore";
+import {useMessageStore, MessageType} from "@/stores/MessageStore";
 import {useI18n} from "vue-i18n";
 import ModelSelect from "@/components/inputs/ModelSelect.vue";
 import VClosableCardTitle from "@/components/dialogs/VClosableCardTitle.vue";
@@ -396,16 +418,19 @@ const dialogReject = ref(false)
 
 const unitFix = ref({
     original: '',
-    target: null as Unit | null
+    target: null as Unit | null,
+    useFuzzy: true
 })
 
 const foodMerge = ref({
     originals: [] as string[],
-    target: null as Food | null
+    target: null as Food | null,
+    useFuzzy: true
 })
 
 const imageFix = ref({
-    url: ''
+    url: '',
+    strategy: 'manual' as 'manual' | 'api_fetch' | 'placeholder'
 })
 
 const tableHeaders = [
@@ -474,6 +499,16 @@ function getStatusColor(status: string): string {
     return colorMap[status] || 'secondary'
 }
 
+function getUnitMatchClass(item: any, unitName: string): string {
+    const unitRecog = item.unitRecognition
+    if (!unitRecog || !Array.isArray(unitRecog)) return ''
+    const match = unitRecog.find((r: any) => r.original === unitName)
+    if (!match) return ''
+    if (match.matchMethod === 'no_match') return 'text-error font-weight-bold'
+    if (match.matchMethod === 'edit_distance' || match.matchMethod === 'trigram') return 'text-warning'
+    return ''
+}
+
 function countIngredients(item: ImportRecipe): number {
     let count = 0
     if (item.recipeData?.steps) {
@@ -525,6 +560,22 @@ function toggleSelectAll() {
     }
 }
 
+async function rescanSelected() {
+    if (selectedIds.value.length === 0) return
+    loadingAction.value = true
+    try {
+        const response = await (api as any).apiImportRecipeRescanCreate({
+            ids: selectedIds.value
+        })
+        useMessageStore().addMessage(MessageType.SUCCESS, `Rescanned ${response.scannedRecipes} recipes, found ${response.totalIssues} issues`, 3000)
+        loadImportRecipes()
+    } catch (err) {
+        useMessageStore().addError(err as any)
+    } finally {
+        loadingAction.value = false
+    }
+}
+
 async function applyUnitFix() {
     if (!unitFix.value.original || !unitFix.value.target?.id) return
     loadingAction.value = true
@@ -532,11 +583,13 @@ async function applyUnitFix() {
         const response = await (api as any).apiImportRecipeBatchUpdateUnitCreate({
             ids: selectedIds.value,
             original_unit: unitFix.value.original,
-            target_unit_id: unitFix.value.target.id
+            target_unit_id: unitFix.value.target.id,
+            use_fuzzy: unitFix.value.useFuzzy
         })
-        useMessageStore().addMessage(MessageType.SUCCESS, `Updated ${response.updatedCount} unit references`, 3000)
+        const msg = `Updated ${response.updatedCount} unit references, resolved ${response.resolvedIssues} issues`
+        useMessageStore().addMessage(MessageType.SUCCESS, msg, 3000)
         dialogUnitFix.value = false
-        unitFix.value = {original: '', target: null}
+        unitFix.value = {original: '', target: null, useFuzzy: true}
         loadImportRecipes()
     } catch (err) {
         useMessageStore().addError(err as any)
@@ -552,11 +605,13 @@ async function applyFoodMerge() {
         const response = await (api as any).apiImportRecipeBatchMergeFoodCreate({
             ids: selectedIds.value,
             original_food_names: foodMerge.value.originals,
-            target_food_id: foodMerge.value.target.id
+            target_food_id: foodMerge.value.target.id,
+            use_fuzzy: foodMerge.value.useFuzzy
         })
-        useMessageStore().addMessage(MessageType.SUCCESS, `Merged ${response.updatedCount} ingredient references`, 3000)
+        const msg = `Merged ${response.updatedCount} ingredient references, resolved ${response.resolvedIssues} issues`
+        useMessageStore().addMessage(MessageType.SUCCESS, msg, 3000)
         dialogMergeFood.value = false
-        foodMerge.value = {originals: [], target: null}
+        foodMerge.value = {originals: [], target: null, useFuzzy: true}
         loadImportRecipes()
     } catch (err) {
         useMessageStore().addError(err as any)
@@ -566,16 +621,38 @@ async function applyFoodMerge() {
 }
 
 async function applyImageFix() {
-    if (!imageFix.value.url) return
     loadingAction.value = true
     try {
-        const response = await (api as any).apiImportRecipeBatchUpdateImageCreate({
+        const payload: any = {
             ids: selectedIds.value,
-            image_url: imageFix.value.url
-        })
-        useMessageStore().addMessage(MessageType.SUCCESS, `Updated ${response.updatedCount} recipe images`, 3000)
+            strategy: imageFix.value.strategy,
+        }
+        if (imageFix.value.strategy === 'manual' && imageFix.value.url) {
+            payload.image_url = imageFix.value.url
+        }
+        const response = await (api as any).apiImportRecipeBatchUpdateImageCreate(payload)
+        const msg = `Updated ${response.updatedCount} recipe images, resolved ${response.resolvedIssues} issues`
+        useMessageStore().addMessage(MessageType.SUCCESS, msg, 3000)
         dialogImageFix.value = false
-        imageFix.value = {url: ''}
+        imageFix.value = {url: '', strategy: 'manual'}
+        loadImportRecipes()
+    } catch (err) {
+        useMessageStore().addError(err as any)
+    } finally {
+        loadingAction.value = false
+    }
+}
+
+async function fetchImagesForSelected() {
+    loadingAction.value = true
+    try {
+        const response = await (api as any).apiImportRecipeFetchImagesCreate({
+            ids: selectedIds.value
+        })
+        const fetched = response.results?.filter((r: any) => r.status === 'fetched').length || 0
+        const failed = response.results?.filter((r: any) => r.status === 'failed').length || 0
+        const skipped = response.results?.filter((r: any) => r.status === 'skipped').length || 0
+        useMessageStore().addMessage(MessageType.SUCCESS, `Fetched: ${fetched}, Failed: ${failed}, Skipped: ${skipped}`, 5000)
         loadImportRecipes()
     } catch (err) {
         useMessageStore().addError(err as any)

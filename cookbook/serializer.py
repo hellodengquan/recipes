@@ -2253,6 +2253,9 @@ class ImportRecipeSerializer(serializers.ModelSerializer):
     issues = ImportIssueSerializer(many=True, read_only=True)
     issue_count = serializers.SerializerMethodField()
     unresolved_issue_count = serializers.SerializerMethodField()
+    unit_recognition = serializers.SerializerMethodField()
+    food_suggestions = serializers.SerializerMethodField()
+    image_suggestions = serializers.SerializerMethodField()
 
     def get_issue_count(self, obj):
         return obj.issues.count()
@@ -2260,15 +2263,71 @@ class ImportRecipeSerializer(serializers.ModelSerializer):
     def get_unresolved_issue_count(self, obj):
         return obj.issues.filter(resolved=False).count()
 
+    def get_unit_recognition(self, obj):
+        from cookbook.helper.import_review_helper import UnitRecognitionHelper
+        request = self.context.get('request')
+        space = request.space if request else None
+        helper = UnitRecognitionHelper(space=space)
+        results = []
+        seen = set()
+        if obj.recipe_data and 'steps' in obj.recipe_data:
+            for step in obj.recipe_data.get('steps', []):
+                for ing in step.get('ingredients', []):
+                    unit_info = ing.get('unit')
+                    if not unit_info:
+                        continue
+                    unit_name = unit_info.get('name', '') if isinstance(unit_info, dict) else str(unit_info)
+                    if unit_name and unit_name not in seen:
+                        seen.add(unit_name)
+                        result = helper.recognize_unit(unit_name)
+                        if result:
+                            results.append(result)
+        return results
+
+    def get_food_suggestions(self, obj):
+        from cookbook.helper.import_review_helper import FoodDeduplicationHelper
+        request = self.context.get('request')
+        space = request.space if request else None
+        helper = FoodDeduplicationHelper(space=space)
+        return helper.find_duplicate_foods(obj.recipe_data)
+
+    def get_image_suggestions(self, obj):
+        from cookbook.helper.import_review_helper import ImageSourceHelper
+        request = self.context.get('request')
+        space = request.space if request else None
+        helper = ImageSourceHelper(space=space)
+        has_image = bool(obj.image_url)
+        if not has_image and obj.recipe_data:
+            has_image = bool(obj.recipe_data.get('imageUrl'))
+        if has_image:
+            return None
+        return helper._suggest_image_sources(obj)
+
     def create(self, validated_data):
+        from cookbook.helper.import_review_helper import scan_import_recipe
         validated_data['created_by'] = self.context['request'].user
         validated_data['space'] = self.context['request'].space
-        return super().create(validated_data)
+        instance = super().create(validated_data)
+        space = self.context['request'].space
+        issues = scan_import_recipe(instance, space=space)
+        for issue_data in issues:
+            ImportIssue.objects.create(
+                import_recipe=instance,
+                issue_type=issue_data['issue_type'],
+                severity=issue_data.get('severity', 'MEDIUM'),
+                message=issue_data.get('message', ''),
+                field_name=issue_data.get('field_name'),
+                original_value=issue_data.get('original_value'),
+                suggested_value=issue_data.get('suggested_value'),
+                space=space,
+            )
+        return instance
 
     class Meta:
         model = ImportRecipe
         fields = (
             'id', 'name', 'import_log', 'source_url', 'recipe_data', 'image_url',
             'status', 'issues', 'issue_count', 'unresolved_issue_count',
+            'unit_recognition', 'food_suggestions', 'image_suggestions',
             'created_at', 'updated_at', 'created_by')
         read_only_fields = ('created_by',)
