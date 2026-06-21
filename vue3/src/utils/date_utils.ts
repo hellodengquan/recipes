@@ -1,5 +1,38 @@
 import {DateTime} from "luxon";
 
+export function parseMealPlanDateTime(isoString: string): Date {
+    const dt = DateTime.fromISO(isoString)
+    const localDt = dt.toLocal()
+    const utcDt = dt.toUTC()
+
+    if (utcDt.startOf('day').toMillis() !== localDt.startOf('day').toMillis()) {
+        return DateTime.fromObject({
+            year: utcDt.year,
+            month: utcDt.month,
+            day: utcDt.day,
+            hour: utcDt.hour,
+            minute: utcDt.minute,
+            second: utcDt.second,
+        }, {zone: 'local'}).toJSDate()
+    }
+
+    return localDt.toJSDate()
+}
+
+export function parseMealPlanDateTimeOptional(isoString: string | null | undefined): Date | undefined {
+    if (isoString == null) return undefined
+    return parseMealPlanDateTime(isoString)
+}
+
+export function formatMealPlanDateTime(date: Date): string {
+    return DateTime.fromJSDate(date).toISO()
+}
+
+export function formatMealPlanDateTimeOptional(date: Date | null | undefined): string | undefined {
+    if (date == null) return undefined
+    return formatMealPlanDateTime(date)
+}
+
 /**
  * shifts a range of dates/any array of dates by the number of days given in the day modifier (can be positive or negative)
  * @param dateRange array of dates
