@@ -425,6 +425,11 @@ class SpaceSerializer(WritableNestedModelSerializer):
 
     @extend_schema_field(int)
     def get_recipe_count(self, obj):
+        from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
+        request = self.context.get('request')
+        if request:
+            strategy = RecipeVisibilityStrategy(request.user, obj)
+            return strategy.filter_queryset(Recipe.objects.filter(space=obj)).count()
         return Recipe.objects.filter(space=obj).count()
 
     @extend_schema_field(int)

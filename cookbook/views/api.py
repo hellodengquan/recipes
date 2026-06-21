@@ -1556,7 +1556,9 @@ class AutoPlanViewSet(LoggingMixin, mixins.CreateModelMixin, viewsets.GenericVie
 
             days = min((end_date - start_date).days + 1, 14)
 
-            recipes = Recipe.objects.filter(space=request.space, internal=True)
+            from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
+            strategy = RecipeVisibilityStrategy(request.user, request.space)
+            recipes = strategy.filter_queryset(Recipe.objects.filter(space=request.space, internal=True))
 
             keywords = serializer.validated_data.get('keywords', [])
             keyword_mode = serializer.validated_data.get('keyword_mode', 'and')
@@ -2610,7 +2612,11 @@ class RecipeUrlImportView(APIView):
                 if re.match('^(https?://)?(www\\.youtube\\.com|youtu\\.be)/.+$', url):
                     response['recipe'] = get_from_youtube_scraper(url, request)
                     if url and url.strip() != '':
-                        response['duplicates'] = Recipe.objects.filter(space=request.space, source_url=url.strip()).values('id', 'name').all()
+                        from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
+                        strategy = RecipeVisibilityStrategy(request.user, request.space)
+                        response['duplicates'] = strategy.filter_queryset(
+                            Recipe.objects.filter(space=request.space, source_url=url.strip())
+                        ).values('id', 'name').all()
                     return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_200_OK)
 
                 tandoor_url = None
@@ -2680,7 +2686,11 @@ class RecipeUrlImportView(APIView):
                 response['recipe'] = helper.get_from_scraper(scrape, request)
                 response['images'] = list(dict.fromkeys(get_images_from_soup(scrape.soup, url)))
                 if url and url.strip() != '':
-                    response['duplicates'] = Recipe.objects.filter(space=request.space, source_url=url.strip()).values('id', 'name').all()
+                    from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
+                    strategy = RecipeVisibilityStrategy(request.user, request.space)
+                    response['duplicates'] = strategy.filter_queryset(
+                        Recipe.objects.filter(space=request.space, source_url=url.strip())
+                    ).values('id', 'name').all()
                 return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_200_OK)
 
             else:
@@ -2833,7 +2843,11 @@ class AiImportView(APIView):
                     response = dict()
                     response['recipe'] = recipe
                     response['images'] = []
-                    response['duplicates'] = Recipe.objects.filter(space=request.space, name=recipe['name']).values('id', 'name').all()
+                    from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
+                    strategy = RecipeVisibilityStrategy(request.user, request.space)
+                    response['duplicates'] = strategy.filter_queryset(
+                        Recipe.objects.filter(space=request.space, name=recipe['name'])
+                    ).values('id', 'name').all()
                     return Response(RecipeFromSourceResponseSerializer(context={'request': request}).to_representation(response), status=status.HTTP_200_OK)
             except JSONDecodeError:
                 traceback.print_exc()
@@ -2992,13 +3006,25 @@ class AppExportView(APIView):
 
         serializer = ExportRequestSerializer(data=request.data, partial=True)
         if serializer.is_valid():
+            from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
+            strategy = RecipeVisibilityStrategy(request.user, request.space)
             if serializer.validated_data['all']:
-                recipes = Recipe.objects.filter(space=request.space, internal=True).all()
+                recipes = strategy.filter_queryset(
+                    Recipe.objects.filter(space=request.space, internal=True)
+                ).all()
             elif serializer.validated_data['custom_filter']:
                 search = RecipeSearch(request, filter=serializer.initial_data['custom_filter']['id'])
-                recipes = search.get_queryset(Recipe.objects.filter(space=request.space, internal=True))
+                recipes = strategy.filter_queryset(
+                    search.get_queryset(Recipe.objects.filter(space=request.space, internal=True))
+                )
             elif len(serializer.validated_data['recipes']) > 0:
-                recipes = Recipe.objects.filter(space=request.space, internal=True, id__in=[item['id'] for item in serializer.initial_data['recipes']]).all()
+                recipes = strategy.filter_queryset(
+                    Recipe.objects.filter(
+                        space=request.space,
+                        internal=True,
+                        id__in=[item['id'] for item in serializer.initial_data['recipes']]
+                    )
+                ).all()
 
             integration = get_integration(request, serializer.validated_data['type'])
 
