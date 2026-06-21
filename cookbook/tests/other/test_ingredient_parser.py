@@ -110,3 +110,47 @@ def test_ingredient_parser(arg, u1_s1):
             parsed = ingredient_parser.parse(key)
             print(f'testing if {key} becomes {val}')
             assert parsed == val
+
+
+def test_ingredient_parser_integer_fraction_mixed(u1_s1):
+    """
+    Test integer and fraction mixing scenarios that previously caused regression issues.
+    Covers various combinations of whole numbers with both string and unicode fractions.
+    """
+    expectations = {
+        "1 1/2 cups flour": (1.5, "cups", "flour", ""),
+        "2 3/4 l milk": (2.75, "l", "milk", ""),
+        "3 1/4 kg apples": (3.25, "kg", "apples", ""),
+        "5 1/8 tbsp sugar": (5.125, "tbsp", "sugar", ""),
+        "1 1/2 Zwiebeln": (1.5, None, "Zwiebeln", ""),
+        "2 1/2 EL Honig": (2.5, "EL", "Honig", ""),
+        "1 ½ cups flour": (1.5, "cups", "flour", ""),
+        "2 ¾ l milk": (2.75, "l", "milk", ""),
+        "3 ¼ kg apples": (3.25, "kg", "apples", ""),
+        "5 ⅛ tbsp sugar": (5.125, "tbsp", "sugar", ""),
+        "1 ½ Zwiebeln": (1.5, None, "Zwiebeln", ""),
+        "2 ½ EL Honig": (2.5, "EL", "Honig", ""),
+        "1 1/2 große Zwiebeln, gehackt": (1.5, "große", "Zwiebeln", "gehackt"),
+        "2 3/4 Tassen Mehl, gesiebt": (2.75, "Tassen", "Mehl", "gesiebt"),
+        "1 ½ cup rice": (1.5, "cup", "rice", ""),
+        "3 1/3 Liter Wasser": (3.3333333333333335, "Liter", "Wasser", ""),
+        "7 2/3 g Salz": (7.666666666666667, "g", "Salz", ""),
+        "0 1/2 l Wasser": (0.5, "l", "Wasser", ""),
+        "10 1/4 g Butter": (10.25, "g", "Butter", ""),
+        "100 1/2 ml Milch": (100.5, "ml", "Milch", ""),
+    }
+
+    user = auth.get_user(u1_s1)
+    space = user.userspace_set.first().space
+    request = RequestFactory()
+    request.user = user
+    request.space = space
+    ingredient_parser = IngredientParser(request, False, ignore_automations=True)
+
+    with scope(space=space):
+        for key, val in expectations.items():
+            parsed = ingredient_parser.parse(key)
+            print(f'testing if {key} becomes {val}')
+            assert abs(parsed[0] - val[0]) < 0.0001, f"Amount mismatch for '{key}': expected {val[0]}, got {parsed[0]}"
+            assert parsed[1] == val[1], f"Unit mismatch for '{key}': expected {val[1]}, got {parsed[1]}"
+            assert parsed[2] == val[2], f"Food mismatch for '{key}': expected {val[2]}, got {parsed[2]}"

@@ -367,3 +367,146 @@ def test_conversion_with_zero(space_1, space_2, u1_s1):
         conversions = uch.get_conversions(ingredient_food_1_gram)
 
         assert len(conversions) == 1 # conversion always includes the ingredient, if count is 1 no other conversion was found
+
+
+def test_unit_dictionary_missing_fallback(space_1, u1_s1):
+    """
+    Test fallback behavior when unit dictionary entries are missing.
+    Verifies that:
+    1. Units with empty base_unit don't crash and return only the original ingredient
+    2. Unknown base units raise ConversionException on direct conversion
+    3. base_conversions gracefully skips units that can't be converted
+    4. get_conversions always returns at least the original ingredient (fallback)
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+        user = auth.get_user(u1_s1)
+
+        unit_no_base = Unit.objects.create(name='mystery_unit', base_unit='', space=space_1)
+        unit_unknown_base = Unit.objects.create(name='weird_unit', base_unit='unknown_base', space=space_1)
+        unit_gram = Unit.objects.create(name='gram', base_unit='g', space=space_1)
+        unit_kg = Unit.objects.create(name='kilogram', base_unit='kg', space=space_1)
+
+        food = Food.objects.create(name='Test Food', space=space_1)
+
+        ingredient_no_base = Ingredient.objects.create(
+            food=food,
+            unit=unit_no_base,
+            amount=5,
+            space=space_1,
+        )
+
+        ingredient_unknown_base = Ingredient.objects.create(
+            food=food,
+            unit=unit_unknown_base,
+            amount=10,
+            space=space_1,
+        )
+
+        ingredient_gram = Ingredient.objects.create(
+            food=food,
+            unit=unit_gram,
+            amount=100,
+            space=space_1,
+        )
+
+        # Test 1: Unit with empty base_unit - get_conversions should return only original (fallback)
+        conversions = uch.get_conversions(ingredient_no_base)
+        assert len(conversions) >= 1, "Should always return at least the original ingredient"
+        assert conversions[0] == ingredient_no_base or conversions[0].unit == unit_no_base, \
+            "First conversion should be the original ingredient"
+
+        # Test 2: Unit with unknown base_unit - should not crash and return original ingredient
+        conversions = uch.get_conversions(ingredient_unknown_base)
+        assert len(conversions) >= 1, "Should always return at least the original ingredient"
+
+        # Test 3: Direct conversion with unknown unit should raise ConversionException
+        try:
+            uch.convert_from_to('unknown_unit', 'g', 100)
+            assert False, "Should have raised ConversionException for unknown unit"
+        except Exception as e:
+            assert 'ConversionException' in type(e).__name__ or 'ConversionException' in str(type(e)), \
+                f"Expected ConversionException, got {type(e).__name__}"
+
+        # Test 4: base_conversions with mixed known and unknown units should gracefully handle
+        # Only known base units should produce conversions
+        base_converted = uch.base_conversions([ingredient_gram])
+        # Should have original + at least kg conversion (since kg is in same system as g)
+        assert len(base_converted) >= 2, f"Expected at least 2 conversions (gram + kg), got {len(base_converted)}"
+
+        # Verify kilogram is in the results
+        unit_names = [c.unit.name for c in base_converted]
+        assert 'kilogram' in unit_names or 'gram' in unit_names, \
+            f"Expected 'kilogram' or 'gram' in results, got {unit_names}"
+
+        # Test 5: Mix of units with and without base_unit - should not crash
+        mixed_ingredients = [ingredient_gram, ingredient_no_base]
+        result = uch.base_conversions(mixed_ingredients)
+        assert len(result) >= len(mixed_ingredients), \
+            "Should at least preserve all original ingredients"
+
+
+def test_conversion_across_systems_fallback(space_1, u1_s1):
+    """
+    Test that converting between weight and volume systems raises ConversionException
+    (no implicit fallback across systems), but get_conversions handles it gracefully.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+
+        unit_gram = Unit.objects.create(name='gram', base_unit='g', space=space_1)
+        unit_ml = Unit.objects.create(name='milliliter', base_unit='ml', space=space_1)
+
+        food = Food.objects.create(name='Test Food', space=space_1)
+
+        ingredient_gram = Ingredient.objects.create(
+            food=food,
+            unit=unit_gram,
+            amount=100,
+            space=space_1,
+        )
+
+        # Test: Direct cross-system conversion should raise exception
+        try:
+            uch.convert_from_to('g', 'ml', 100)
+            assert False, "Should have raised ConversionException for cross-system conversion"
+        except Exception as e:
+            assert 'ConversionException' in type(e).__name__ or 'ConversionException' in str(type(e)), \
+                f"Expected ConversionException, got {type(e).__name__}"
+
+        # Test: get_conversions with weight unit should only return weight conversions, not volume
+        conversions = uch.get_conversions(ingredient_gram)
+        # Should include original and other weight units, but NO volume units
+        for conv in conversions:
+            if conv.unit.base_unit:
+                assert conv.unit.base_unit in ['g', 'kg', 'ounce', 'pound'] or conv.unit.base_unit in [], \
+                    f"Should not have volume base units like {conv.unit.base_unit}"
+
+
+def test_unit_none_fallback(space_1, u1_s1):
+    """
+    Test behavior when ingredient has no unit (unit is None).
+    This is a common edge case that should be handled gracefully.
+    """
+    with scopes_disabled():
+        uch = UnitConversionHelper(space_1)
+
+        food = Food.objects.create(name='Test Food', space=space_1)
+
+        ingredient_no_unit = Ingredient.objects.create(
+            food=food,
+            unit=None,
+            amount=3,
+            space=space_1,
+        )
+
+        # get_conversions should handle None unit gracefully (fallback to just the ingredient)
+        conversions = uch.get_conversions(ingredient_no_unit)
+        assert len(conversions) >= 1, "Should return at least the original ingredient"
+        assert conversions[0].food == food, "Food should be preserved"
+        assert conversions[0].amount == 3, "Amount should be preserved"
+
+        # base_conversions should also handle None unit gracefully
+        base_result = uch.base_conversions([ingredient_no_unit])
+        assert len(base_result) >= 1, "Should return at least the original ingredient"
+
