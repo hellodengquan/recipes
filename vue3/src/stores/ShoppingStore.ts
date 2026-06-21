@@ -27,6 +27,12 @@ import {ErrorMessageType, PreparedMessage, useMessageStore} from "@/stores/Messa
 import {useUserPreferenceStore} from "@/stores/UserPreferenceStore";
 import {isDelayed, isEntryVisible} from "@/utils/logic_utils";
 import {DateTime} from "luxon";
+import {
+    restoreCalendricalDateFromTransport,
+    restoreCalendricalDateOptional,
+    prepareCalendricalDateForTransport,
+    prepareCalendricalDateOptional,
+} from "@/utils/date_utils";
 
 const _STORE_ID = "shopping_store"
 const UNDEFINED_CATEGORY = 'shopping_undefined_category'
@@ -51,6 +57,22 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
     let syncQueueRunning = ref(false)
 
     let entriesByGroup = shallowRef([] as IShoppingListCategory[])
+
+    function _normalizeShoppingEntryForRead(entry: ShoppingListEntry): ShoppingListEntry {
+        return {
+            ...entry,
+            completedAt: restoreCalendricalDateOptional(entry.completedAt),
+            delayUntil: restoreCalendricalDateOptional(entry.delayUntil),
+        }
+    }
+
+    function _normalizeShoppingEntryForWrite(entry: ShoppingListEntry): ShoppingListEntry {
+        return {
+            ...entry,
+            completedAt: prepareCalendricalDateOptional(entry.completedAt),
+            delayUntil: prepareCalendricalDateOptional(entry.delayUntil),
+        }
+    }
     let entriesByGroupMealPlan = shallowRef([] as IShoppingListCategory[])
     let selectedMealPlan = ref<number | undefined>(undefined)
 
@@ -253,7 +275,7 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
             let promises = [] as Promise<any>[]
             let newMap = new Map<number, ShoppingListEntry>()
             r.results.forEach((e) => {
-                newMap.set(e.id!, e)
+                newMap.set(e.id!, _normalizeShoppingEntryForRead(e))
             })
             // bulk assign to avoid unnecessary reactivity updates
             globalEntriesMap.value = new Map([...globalEntriesMap.value, ...newMap])
@@ -290,7 +312,7 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
             api.apiShoppingListEntryList({updatedAfter: autoSyncLastTimestamp.value}).then((r) => {
                 autoSyncLastTimestamp.value = r.timestamp!
                 r.results.forEach((e) => {
-                    globalEntriesMap.value.set(e.id!, e)
+                    globalEntriesMap.value.set(e.id!, _normalizeShoppingEntryForRead(e))
                 })
                 if (r.results.length > 0) {
                     updateEntriesStructure()
@@ -309,13 +331,15 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
      */
     function createObject(object: ShoppingListEntry, undo: boolean) {
         const api = new ApiApi()
-        return api.apiShoppingListEntryCreate({shoppingListEntry: object}).then((r) => {
-            globalEntriesMap.value.set(r.id!, r)
+        const preparedObject = _normalizeShoppingEntryForWrite(object)
+        return api.apiShoppingListEntryCreate({shoppingListEntry: preparedObject}).then((r) => {
+            const normalizedR = _normalizeShoppingEntryForRead(r)
+            globalEntriesMap.value.set(r.id!, normalizedR)
             updateEntriesStructure()
             if (undo) {
-                registerChange("CREATE", [r])
+                registerChange("CREATE", [normalizedR])
             }
-            return r
+            return normalizedR
         }).catch((err) => {
             useMessageStore().addError(ErrorMessageType.CREATE_ERROR, err)
             return undefined
@@ -337,8 +361,9 @@ export const useShoppingStore = defineStore(_STORE_ID, () => {
         // object.updatedAt = DateTime.toLocaleString()
         // TODO setting timestamp on the client does not make sense because client and server clock might be out of sync and field will be overridden by server anyway
 
-        return api.apiShoppingListEntryUpdate({id: object.id!, shoppingListEntry: object}).then((r) => {
-            globalEntriesMap.value.set(r.id!, r)
+        const preparedObject = _normalizeShoppingEntryForWrite(object)
+        return api.apiShoppingListEntryUpdate({id: object.id!, shoppingListEntry: preparedObject}).then((r) => {
+            globalEntriesMap.value.set(r.id!, _normalizeShoppingEntryForRead(r))
         }).catch((err) => {
             useMessageStore().addError(ErrorMessageType.UPDATE_ERROR, err)
         })

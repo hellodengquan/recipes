@@ -23,6 +23,10 @@ import {defineAsyncComponent, shallowRef} from "vue";
 import {
     normalizeMealPlanDatesForRead,
     normalizeMealPlanDatesForWrite,
+    restoreCalendricalDateFromTransport,
+    restoreCalendricalDateOptional,
+    prepareCalendricalDateForTransport,
+    prepareCalendricalDateOptional,
 } from "@/utils/date_utils";
 
 type VDataTableProps = InstanceType<typeof VDataTable>['$props']
@@ -580,7 +584,41 @@ export const TShoppingListEntry = {
         {title: 'Unit', key: 'unit.name'},
         {title: 'Food', key: 'food.name'},
         {title: 'Actions', key: 'action', align: 'end'},
-    ]
+    ],
+
+    customCreate: (api: ApiApi, obj: ShoppingListEntry): Promise<ShoppingListEntry> => {
+        const prepared = {
+            ...obj,
+            completedAt: prepareCalendricalDateOptional(obj.completedAt),
+            delayUntil: prepareCalendricalDateOptional(obj.delayUntil),
+        }
+        return api.apiShoppingListEntryCreate({shoppingListEntry: prepared}).then(r => ({
+            ...r,
+            completedAt: restoreCalendricalDateOptional(r.completedAt),
+            delayUntil: restoreCalendricalDateOptional(r.delayUntil),
+        }))
+    },
+
+    customUpdate: (api: ApiApi, id: number, obj: ShoppingListEntry): Promise<ShoppingListEntry> => {
+        const prepared = {
+            ...obj,
+            completedAt: prepareCalendricalDateOptional(obj.completedAt),
+            delayUntil: prepareCalendricalDateOptional(obj.delayUntil),
+        }
+        return api.apiShoppingListEntryUpdate({id, shoppingListEntry: prepared}).then(r => ({
+            ...r,
+            completedAt: restoreCalendricalDateOptional(r.completedAt),
+            delayUntil: restoreCalendricalDateOptional(r.delayUntil),
+        }))
+    },
+
+    customRetrieve: (api: ApiApi, id: number): Promise<ShoppingListEntry> => {
+        return api.apiShoppingListEntryRetrieve({id}).then(r => ({
+            ...r,
+            completedAt: restoreCalendricalDateOptional(r.completedAt),
+            delayUntil: restoreCalendricalDateOptional(r.delayUntil),
+        }))
+    },
 } as Model
 registerModel(TShoppingListEntry)
 
@@ -700,7 +738,25 @@ export const TCookLog = {
         {title: 'Recipe', key: 'recipe'},
         {title: 'Created', key: 'createdAt'},
         {title: 'Actions', key: 'action', align: 'end'},
-    ]
+    ],
+
+    customRetrieve: (api: ApiApi, id: number): Promise<CookLog> => {
+        return api.apiCookLogRetrieve({id}).then(r => ({
+            ...r,
+            createdAt: r.createdAt ? restoreCalendricalDateFromTransport(r.createdAt) : r.createdAt,
+        }))
+    },
+
+    customUpdate: (api: ApiApi, id: number, obj: CookLog): Promise<CookLog> => {
+        const prepared = {
+            ...obj,
+            createdAt: obj.createdAt ? prepareCalendricalDateForTransport(obj.createdAt) : obj.createdAt,
+        }
+        return api.apiCookLogUpdate({id, cookLog: prepared}).then(r => ({
+            ...r,
+            createdAt: r.createdAt ? restoreCalendricalDateFromTransport(r.createdAt) : r.createdAt,
+        }))
+    },
 } as Model
 registerModel(TCookLog)
 

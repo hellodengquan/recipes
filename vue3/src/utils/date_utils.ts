@@ -21,6 +21,24 @@ export function restoreMealPlanDateFromTransport(transportDate: Date): Date {
     }, {zone: 'local'}).toJSDate()
 }
 
+export function prepareCalendricalDateForTransport(localCalendarDate: Date): Date {
+    return prepareMealPlanDateForTransport(localCalendarDate)
+}
+
+export function restoreCalendricalDateFromTransport(transportDate: Date): Date {
+    return restoreMealPlanDateFromTransport(transportDate)
+}
+
+export function prepareCalendricalDateOptional(date: Date | null | undefined): Date | undefined {
+    if (date == null) return undefined
+    return prepareCalendricalDateForTransport(date)
+}
+
+export function restoreCalendricalDateOptional(date: Date | null | undefined): Date | undefined {
+    if (date == null) return undefined
+    return restoreCalendricalDateFromTransport(date)
+}
+
 export function prepareMealPlanDateForTransportOptional(date: Date | null | undefined): Date | undefined {
     if (date == null) return undefined
     return prepareMealPlanDateForTransport(date)
