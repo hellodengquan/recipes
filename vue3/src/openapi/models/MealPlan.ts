@@ -25,12 +25,6 @@ import {
     RecipeOverviewFromJSONTyped,
     RecipeOverviewToJSON,
 } from './RecipeOverview';
-import {
-    parseMealPlanDateTime,
-    parseMealPlanDateTimeOptional,
-    formatMealPlanDateTime,
-    formatMealPlanDateTimeOptional,
-} from '../../utils/date_utils';
 
 /**
  * Adds nested create feature
@@ -155,8 +149,8 @@ export function MealPlanFromJSONTyped(json: any, ignoreDiscriminator: boolean): 
         'servings': json['servings'],
         'note': json['note'] == null ? undefined : json['note'],
         'noteMarkdown': json['note_markdown'],
-        'fromDate': parseMealPlanDateTime(json['from_date']),
-        'toDate': parseMealPlanDateTimeOptional(json['to_date']),
+        'fromDate': (new Date(json['from_date'])),
+        'toDate': json['to_date'] == null ? undefined : (new Date(json['to_date'])),
         'mealType': MealTypeFromJSON(json['meal_type']),
         'createdBy': json['created_by'],
         'recipeName': json['recipe_name'],
@@ -177,8 +171,8 @@ export function MealPlanToJSON(value?: Omit<MealPlan, 'noteMarkdown'|'createdBy'
         'recipe': RecipeOverviewToJSON(value['recipe']),
         'servings': value['servings'],
         'note': value['note'],
-        'from_date': formatMealPlanDateTime(value['fromDate']),
-        'to_date': formatMealPlanDateTimeOptional(value['toDate']),
+        'from_date': ((value['fromDate']).toISOString()),
+        'to_date': value['toDate'] == null ? undefined : ((value['toDate']).toISOString()),
         'meal_type': MealTypeToJSON(value['mealType']),
         'addshopping': value['addshopping'],
     };

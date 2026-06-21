@@ -1,36 +1,50 @@
 import {DateTime} from "luxon";
 
-export function parseMealPlanDateTime(isoString: string): Date {
-    const dt = DateTime.fromISO(isoString)
-    const localDt = dt.toLocal()
-    const utcDt = dt.toUTC()
-
-    if (utcDt.startOf('day').toMillis() !== localDt.startOf('day').toMillis()) {
-        return DateTime.fromObject({
-            year: utcDt.year,
-            month: utcDt.month,
-            day: utcDt.day,
-            hour: utcDt.hour,
-            minute: utcDt.minute,
-            second: utcDt.second,
-        }, {zone: 'local'}).toJSDate()
-    }
-
-    return localDt.toJSDate()
+export function prepareMealPlanDateForTransport(localCalendarDate: Date): Date {
+    const dt = DateTime.fromJSDate(localCalendarDate)
+    return DateTime.utc(
+        dt.year, dt.month, dt.day,
+        dt.hour, dt.minute, dt.second, dt.millisecond
+    ).toJSDate()
 }
 
-export function parseMealPlanDateTimeOptional(isoString: string | null | undefined): Date | undefined {
-    if (isoString == null) return undefined
-    return parseMealPlanDateTime(isoString)
+export function restoreMealPlanDateFromTransport(transportDate: Date): Date {
+    const utcDt = DateTime.fromJSDate(transportDate).toUTC()
+    return DateTime.fromObject({
+        year: utcDt.year,
+        month: utcDt.month,
+        day: utcDt.day,
+        hour: utcDt.hour,
+        minute: utcDt.minute,
+        second: utcDt.second,
+        millisecond: utcDt.millisecond,
+    }, {zone: 'local'}).toJSDate()
 }
 
-export function formatMealPlanDateTime(date: Date): string {
-    return DateTime.fromJSDate(date).toISO()
-}
-
-export function formatMealPlanDateTimeOptional(date: Date | null | undefined): string | undefined {
+export function prepareMealPlanDateForTransportOptional(date: Date | null | undefined): Date | undefined {
     if (date == null) return undefined
-    return formatMealPlanDateTime(date)
+    return prepareMealPlanDateForTransport(date)
+}
+
+export function restoreMealPlanDateFromTransportOptional(date: Date | null | undefined): Date | undefined {
+    if (date == null) return undefined
+    return restoreMealPlanDateFromTransport(date)
+}
+
+export function normalizeMealPlanDatesForWrite<T extends { fromDate: Date; toDate?: Date }>(obj: T): T {
+    return {
+        ...obj,
+        fromDate: prepareMealPlanDateForTransport(obj.fromDate),
+        toDate: prepareMealPlanDateForTransportOptional(obj.toDate),
+    } as T
+}
+
+export function normalizeMealPlanDatesForRead<T extends { fromDate: Date; toDate?: Date }>(obj: T): T {
+    return {
+        ...obj,
+        fromDate: restoreMealPlanDateFromTransport(obj.fromDate),
+        toDate: restoreMealPlanDateFromTransportOptional(obj.toDate),
+    } as T
 }
 
 /**

@@ -20,6 +20,10 @@ import {VDataTable} from "vuetify/components";
 import {getNestedProperty} from "@/utils/utils";
 import {useUserPreferenceStore} from "@/stores/UserPreferenceStore";
 import {defineAsyncComponent, shallowRef} from "vue";
+import {
+    normalizeMealPlanDatesForRead,
+    normalizeMealPlanDatesForWrite,
+} from "@/utils/date_utils";
 
 type VDataTableProps = InstanceType<typeof VDataTable>['$props']
 
@@ -122,6 +126,10 @@ export type Model = {
     isTree?: boolean | undefined,
 
     tableHeaders: ModelTableHeaders[],
+
+    customCreate?: (api: ApiApi, obj: any) => Promise<any>,
+    customUpdate?: (api: ApiApi, id: number, obj: any) => Promise<any>,
+    customRetrieve?: (api: ApiApi, id: number) => Promise<any>,
 }
 export let SUPPORTED_MODELS = new Map<string, Model>()
 
@@ -374,7 +382,21 @@ export const TMealPlan = {
         {title: 'Title', key: 'title'},
         {title: 'StartDate', key: 'startDate'},
         {title: 'Actions', key: 'action', align: 'end'},
-    ]
+    ],
+
+    customCreate: (api: ApiApi, obj: MealPlan): Promise<MealPlan> => {
+        const prepared = normalizeMealPlanDatesForWrite(obj)
+        return api.apiMealPlanCreate({mealPlan: prepared}).then(r => normalizeMealPlanDatesForRead(r))
+    },
+
+    customUpdate: (api: ApiApi, id: number, obj: MealPlan): Promise<MealPlan> => {
+        const prepared = normalizeMealPlanDatesForWrite(obj)
+        return api.apiMealPlanUpdate({id, mealPlan: prepared}).then(r => normalizeMealPlanDatesForRead(r))
+    },
+
+    customRetrieve: (api: ApiApi, id: number): Promise<MealPlan> => {
+        return api.apiMealPlanRetrieve({id}).then(r => normalizeMealPlanDatesForRead(r))
+    },
 } as Model
 registerModel(TMealPlan)
 
@@ -1127,6 +1149,8 @@ export class GenericModel {
     create(obj: EditorSupportedTypes) {
         if (this.model.disableCreate) {
             throw new Error('Cannot create on this model!')
+        } else if (this.model.customCreate) {
+            return this.model.customCreate(this.api, obj)
         } else {
             let createRequestParams: any = {}
             createRequestParams[this.model.name.charAt(0).toLowerCase() + this.model.name.slice(1)] = obj
@@ -1144,6 +1168,8 @@ export class GenericModel {
     update(id: number, obj: EditorSupportedTypes) {
         if (this.model.disableUpdate) {
             throw new Error('Cannot update on this model!')
+        } else if (this.model.customUpdate) {
+            return this.model.customUpdate(this.api, id, obj)
         } else {
             let updateRequestParams: any = {}
             updateRequestParams['id'] = id
@@ -1161,6 +1187,8 @@ export class GenericModel {
     retrieve(id: number) {
         if (this.model.disableRetrieve) {
             throw new Error('Cannot delete on this model!')
+        } else if (this.model.customRetrieve) {
+            return this.model.customRetrieve(this.api, id)
         } else {
             let retrieveRequestParams: any = {}
             retrieveRequestParams['id'] = id

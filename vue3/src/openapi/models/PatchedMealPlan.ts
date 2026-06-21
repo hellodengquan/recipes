@@ -25,10 +25,6 @@ import {
     RecipeOverviewFromJSONTyped,
     RecipeOverviewToJSON,
 } from './RecipeOverview';
-import {
-    parseMealPlanDateTimeOptional,
-    formatMealPlanDateTimeOptional,
-} from '../../utils/date_utils';
 
 /**
  * Adds nested create feature
@@ -145,8 +141,8 @@ export function PatchedMealPlanFromJSONTyped(json: any, ignoreDiscriminator: boo
         'servings': json['servings'] == null ? undefined : json['servings'],
         'note': json['note'] == null ? undefined : json['note'],
         'noteMarkdown': json['note_markdown'] == null ? undefined : json['note_markdown'],
-        'fromDate': parseMealPlanDateTimeOptional(json['from_date']),
-        'toDate': parseMealPlanDateTimeOptional(json['to_date']),
+        'fromDate': json['from_date'] == null ? undefined : (new Date(json['from_date'])),
+        'toDate': json['to_date'] == null ? undefined : (new Date(json['to_date'])),
         'mealType': json['meal_type'] == null ? undefined : MealTypeFromJSON(json['meal_type']),
         'createdBy': json['created_by'] == null ? undefined : json['created_by'],
         'recipeName': json['recipe_name'] == null ? undefined : json['recipe_name'],
@@ -167,8 +163,8 @@ export function PatchedMealPlanToJSON(value?: Omit<PatchedMealPlan, 'noteMarkdow
         'recipe': RecipeOverviewToJSON(value['recipe']),
         'servings': value['servings'],
         'note': value['note'],
-        'from_date': formatMealPlanDateTimeOptional(value['fromDate']),
-        'to_date': formatMealPlanDateTimeOptional(value['toDate']),
+        'from_date': value['fromDate'] == null ? undefined : ((value['fromDate']).toISOString()),
+        'to_date': value['toDate'] == null ? undefined : ((value['toDate']).toISOString()),
         'meal_type': MealTypeToJSON(value['mealType']),
         'addshopping': value['addshopping'],
     };
