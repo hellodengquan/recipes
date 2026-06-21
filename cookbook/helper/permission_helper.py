@@ -404,10 +404,13 @@ class CustomRecipePermission(permissions.BasePermission):
 
     def has_object_permission(self, request, view, obj):
         from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
+        from django_scopes import scopes_disabled
         strategy = RecipeVisibilityStrategy.from_request(request)
-        if strategy.share_uuid and not share_link_valid(obj, strategy.share_uuid):
-            if obj.space != request.space:
-                raise Http404()
+        if strategy.share_uuid:
+            with scopes_disabled():
+                if not share_link_valid(obj, strategy.share_uuid):
+                    if obj.space != request.space:
+                        raise Http404()
         if request.method in SAFE_METHODS:
             return strategy.can_view(obj)
         if request.method == 'DELETE':

@@ -1,4 +1,5 @@
 from django.db.models import Q
+from django_scopes import scopes_disabled
 from rest_framework.permissions import SAFE_METHODS
 
 from cookbook.helper.permission_helper import (
@@ -61,8 +62,10 @@ class RecipeVisibilityStrategy:
           2. If the recipe is private → only creator or shared users.
           3. If the recipe is public → any guest (read) or user-level member.
         """
-        if self.share_uuid and share_link_valid(recipe, self.share_uuid):
-            return True
+        if self.share_uuid:
+            with scopes_disabled():
+                if share_link_valid(recipe, self.share_uuid):
+                    return True
 
         if recipe.private:
             return (
@@ -130,8 +133,10 @@ class RecipeVisibilityStrategy:
         **or** the user has at least guest-level membership in the recipe's
         space.
         """
-        if self.share_uuid and share_link_valid(recipe, self.share_uuid):
-            return True
+        if self.share_uuid:
+            with scopes_disabled():
+                if share_link_valid(recipe, self.share_uuid):
+                    return True
         return (
             has_group_permission(self.user, ['guest'])
             and recipe.space == self.space

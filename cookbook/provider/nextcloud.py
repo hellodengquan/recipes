@@ -27,7 +27,7 @@ class Nextcloud(Provider):
         return wc.Client(options)
 
     @staticmethod
-    def import_all(monitor):
+    def import_all(monitor, user=None):
         client = Nextcloud.get_client(monitor.storage)
 
         if DEBUG:
@@ -43,7 +43,12 @@ class Nextcloud(Provider):
             if DEBUG:
                 print(f'TANDOOR_PROVIDER_DEBUG importing file {file}')
             path = monitor.path + '/' + file
-            if not Recipe.objects.filter(file_path__iexact=path, space=monitor.space).exists() and not RecipeImport.objects.filter(file_path=path, space=monitor.space).exists():
+            recipe_query = Recipe.objects.filter(file_path__iexact=path, space=monitor.space)
+            if user is not None:
+                from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
+                strategy = RecipeVisibilityStrategy(user, monitor.space)
+                recipe_query = strategy.filter_queryset(recipe_query)
+            if not recipe_query.exists() and not RecipeImport.objects.filter(file_path=path, space=monitor.space).exists():
                 name = os.path.splitext(file)[0]
                 new_recipe = RecipeImport(
                     name=name,

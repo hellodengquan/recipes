@@ -11,7 +11,7 @@ from cookbook.provider.provider import Provider
 class Dropbox(Provider):
 
     @staticmethod
-    def import_all(monitor):
+    def import_all(monitor, user=None):
         url = "https://api.dropboxapi.com/2/files/list_folder"
 
         headers = {
@@ -35,7 +35,12 @@ class Dropbox(Provider):
         # TODO check if has_more is set and import that as well
         for recipe in recipes['entries']:
             path = recipe['path_lower']
-            if not Recipe.objects.filter(file_path__iexact=path, space=monitor.space).exists() and not RecipeImport.objects.filter(file_path=path, space=monitor.space).exists():
+            recipe_query = Recipe.objects.filter(file_path__iexact=path, space=monitor.space)
+            if user is not None:
+                from cookbook.helper.visibility_strategy import RecipeVisibilityStrategy
+                strategy = RecipeVisibilityStrategy(user, monitor.space)
+                recipe_query = strategy.filter_queryset(recipe_query)
+            if not recipe_query.exists() and not RecipeImport.objects.filter(file_path=path, space=monitor.space).exists():
                 name = os.path.splitext(recipe['name'])[0]
                 new_recipe = RecipeImport(
                     name=name,

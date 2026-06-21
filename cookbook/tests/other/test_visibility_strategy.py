@@ -55,6 +55,7 @@ def share_link(private_recipe, u1_s1, space_1):
             recipe=private_recipe,
             space=space_1,
             uuid=str(uuid.uuid4()),
+            created_by=auth.get_user(u1_s1),
         )
     return sl
 
@@ -65,24 +66,28 @@ class TestRecipeVisibilityStrategyQueryset:
     def test_public_recipe_visible_to_all(self, public_recipe, u2_s1, space_1):
         """Public recipes are visible to any user in the same space."""
         strategy = RecipeVisibilityStrategy(auth.get_user(u2_s1), space_1)
-        qs = strategy.filter_queryset(Recipe.objects.filter(space=space_1))
-        assert public_recipe.id in [r.id for r in qs]
+        with scopes_disabled():
+            qs = strategy.filter_queryset(Recipe.objects.filter(space=space_1))
+            assert public_recipe.id in [r.id for r in qs]
 
     def test_private_recipe_visible_only_to_owner(self, private_recipe, u1_s1, u2_s1, space_1):
         """Private recipes are visible only to their creator."""
         strategy_owner = RecipeVisibilityStrategy(auth.get_user(u1_s1), space_1)
-        qs_owner = strategy_owner.filter_queryset(Recipe.objects.filter(space=space_1))
-        assert private_recipe.id in [r.id for r in qs_owner]
+        with scopes_disabled():
+            qs_owner = strategy_owner.filter_queryset(Recipe.objects.filter(space=space_1))
+            assert private_recipe.id in [r.id for r in qs_owner]
 
         strategy_other = RecipeVisibilityStrategy(auth.get_user(u2_s1), space_1)
-        qs_other = strategy_other.filter_queryset(Recipe.objects.filter(space=space_1))
-        assert private_recipe.id not in [r.id for r in qs_other]
+        with scopes_disabled():
+            qs_other = strategy_other.filter_queryset(Recipe.objects.filter(space=space_1))
+            assert private_recipe.id not in [r.id for r in qs_other]
 
     def test_private_recipe_visible_to_shared_users(self, shared_private_recipe, u2_s1, space_1):
         """Private recipes are visible to users in the shared list."""
         strategy = RecipeVisibilityStrategy(auth.get_user(u2_s1), space_1)
-        qs = strategy.filter_queryset(Recipe.objects.filter(space=space_1))
-        assert shared_private_recipe.id in [r.id for r in qs]
+        with scopes_disabled():
+            qs = strategy.filter_queryset(Recipe.objects.filter(space=space_1))
+            assert shared_private_recipe.id in [r.id for r in qs]
 
 
 class TestRecipeVisibilityStrategyObjectView:

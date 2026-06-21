@@ -1,6 +1,6 @@
 class Provider:
     @staticmethod
-    def import_all(monitor):
+    def import_all(monitor, user=None):
         raise Exception('Method not implemented in storage provider')
 
     @staticmethod

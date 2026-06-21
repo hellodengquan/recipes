@@ -936,11 +936,11 @@ class SyncViewSet(LoggingMixin, viewsets.ModelViewSet, DeleteRelationMixing):
 
         sync_log = None
         if sync.storage.method == Storage.DROPBOX:
-            sync_log = Dropbox.import_all(sync)
+            sync_log = Dropbox.import_all(sync, user=request.user)
         if sync.storage.method == Storage.NEXTCLOUD:
-            sync_log = Nextcloud.import_all(sync)
+            sync_log = Nextcloud.import_all(sync, user=request.user)
         if sync.storage.method == Storage.LOCAL:
-            sync_log = Local.import_all(sync)
+            sync_log = Local.import_all(sync, user=request.user)
 
         return Response(SyncLogSerializer(sync_log, many=False, context={'request': self.request}).data)
 
@@ -3373,15 +3373,15 @@ def sync_all(request):
     error = False
     for monitor in monitors:
         if monitor.storage.method == Storage.DROPBOX:
-            ret = Dropbox.import_all(monitor)
+            ret = Dropbox.import_all(monitor, user=request.user)
             if not ret:
                 error = True
         if monitor.storage.method == Storage.NEXTCLOUD:
-            ret = Nextcloud.import_all(monitor)
+            ret = Nextcloud.import_all(monitor, user=request.user)
             if not ret:
                 error = True
         if monitor.storage.method == Storage.LOCAL:
-            ret = Local.import_all(monitor)
+            ret = Local.import_all(monitor, user=request.user)
             if not ret:
                 error = True
 
