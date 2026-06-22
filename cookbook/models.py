@@ -327,6 +327,48 @@ class Space(ExportModelOperationsMixin('space'), models.Model):
 
     internal_note = models.TextField(blank=True, null=True)
 
+    import_review_fuzzy_threshold = models.DecimalField(
+        default=0.7,
+        decimal_places=2,
+        max_digits=3,
+        help_text=_(
+            'Fuzzy match threshold (0.0-1.0) for import review unit recognition and food deduplication. '
+            'Higher values are stricter. Default: 0.7 (edit distance). Trigram default is 0.6.'
+        ),
+    )
+    import_review_trigram_threshold = models.DecimalField(
+        default=0.6,
+        decimal_places=2,
+        max_digits=3,
+        help_text=_('Trigram similarity threshold (0.0-1.0) for import review. Default: 0.6.'),
+    )
+    import_review_image_fetch_concurrency = models.PositiveIntegerField(
+        default=3,
+        help_text=_('Maximum concurrent image fetches during import review. Default: 3.'),
+    )
+    import_review_batch_result_limit = models.PositiveIntegerField(
+        default=100,
+        help_text=_('Maximum number of per-item detailed results returned for batch operations. Default: 100.'),
+    )
+
+    FOOD_TIEBREAKER_LEXICOGRAPHIC = 'LEX'
+    FOOD_TIEBREAKER_CREATED_AT = 'CREATED_AT'
+    FOOD_TIEBREAKER_ID = 'ID'
+    FOOD_TIEBREAKER_CHOICES = (
+        (FOOD_TIEBREAKER_LEXICOGRAPHIC, _('Lexicographic (alphabetical)')),
+        (FOOD_TIEBREAKER_CREATED_AT, _('Most recently created')),
+        (FOOD_TIEBREAKER_ID, _('Highest database ID (latest)')),
+    )
+    import_review_food_tiebreaker = models.CharField(
+        max_length=16,
+        choices=FOOD_TIEBREAKER_CHOICES,
+        default=FOOD_TIEBREAKER_LEXICOGRAPHIC,
+        help_text=_(
+            'Tiebreaker strategy for duplicate foods with same-length normalized names. '
+            'Default: Lexicographic (alphabetical order picks the "smallest" name).'
+        ),
+    )
+
     def safe_delete(self):
         """
         Safely deletes a space by deleting all objects belonging to the space first and then deleting the space itself

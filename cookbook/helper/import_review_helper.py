@@ -103,12 +103,22 @@ class UnitRecognitionHelper:
     EXACT_MATCH_SCORE = 1.0
     ALIAS_MATCH_SCORE = 0.95
     DB_MATCH_SCORE = 0.9
-    TRIGRAM_THRESHOLD = 0.6
-    LEVENSHTEIN_THRESHOLD = 0.7
+    DEFAULT_TRIGRAM_THRESHOLD = 0.6
+    DEFAULT_LEVENSHTEIN_THRESHOLD = 0.7
 
     def __init__(self, space=None):
         self.space = space
         self._db_units = None
+        self.trigram_threshold = self.DEFAULT_TRIGRAM_THRESHOLD
+        self.levenshtein_threshold = self.DEFAULT_LEVENSHTEIN_THRESHOLD
+        if space is not None:
+            try:
+                if space.import_review_trigram_threshold is not None:
+                    self.trigram_threshold = float(space.import_review_trigram_threshold)
+                if space.import_review_fuzzy_threshold is not None:
+                    self.levenshtein_threshold = float(space.import_review_fuzzy_threshold)
+            except Exception:
+                pass
 
     def _get_db_units(self):
         if self._db_units is None and self.space:
@@ -149,11 +159,11 @@ class UnitRecognitionHelper:
             }
 
         best_alias = self._fuzzy_match_alias(normalized)
-        if best_alias and best_alias['confidence'] >= self.LEVENSHTEIN_THRESHOLD:
+        if best_alias and best_alias['confidence'] >= self.levenshtein_threshold:
             return best_alias
 
         best_db = self._fuzzy_match_db(normalized)
-        if best_db and best_db['confidence'] >= self.TRIGRAM_THRESHOLD:
+        if best_db and best_db['confidence'] >= self.trigram_threshold:
             return best_db
 
         return {
@@ -203,7 +213,7 @@ class UnitRecognitionHelper:
             matches = (
                 Unit.objects.filter(space=self.space)
                 .annotate(similarity=TrigramSimilarity('name', normalized))
-                .filter(similarity__gte=self.TRIGRAM_THRESHOLD)
+                .filter(similarity__gte=self.trigram_threshold)
                 .order_by('-similarity')[:1]
             )
             for unit in matches:
@@ -225,7 +235,7 @@ class UnitRecognitionHelper:
                 if score > best_score:
                     best_score = score
                     best = u
-            if best and best_score >= self.LEVENSHTEIN_THRESHOLD:
+            if best and best_score >= self.levenshtein_threshold:
                 return {
                     'original': normalized,
                     'normalized': normalized,
@@ -299,8 +309,10 @@ class UnitRecognitionHelper:
 
 class FoodDeduplicationHelper:
 
-    TRIGRAM_THRESHOLD = 0.5
-    LEVENSHTEIN_THRESHOLD = 0.75
+    DEFAULT_TRIGRAM_THRESHOLD = 0.5
+    DEFAULT_LEVENSHTEIN_THRESHOLD = 0.75
+    DEFAULT_TIEBREAKER = 'LEX'
+
     STOP_WORDS = frozenset({
         'and', 'or', 'the', 'a', 'an', 'of', 'with', 'fresh', 'dried', 'chopped', 'sliced',
         'minced', 'grated', 'ground', 'whole', 'large', 'small', 'medium', 'finely', 'roughly',
@@ -308,6 +320,19 @@ class FoodDeduplicationHelper:
 
     def __init__(self, space=None):
         self.space = space
+        self.trigram_threshold = self.DEFAULT_TRIGRAM_THRESHOLD
+        self.levenshtein_threshold = self.DEFAULT_LEVENSHTEIN_THRESHOLD
+        self.tiebreaker = self.DEFAULT_TIEBREAKER
+        if space is not None:
+            try:
+                if space.import_review_trigram_threshold is not None:
+                    self.trigram_threshold = float(space.import_review_trigram_threshold)
+                if space.import_review_fuzzy_threshold is not None:
+                    self.levenshtein_threshold = float(space.import_review_fuzzy_threshold)
+                if space.import_review_food_tiebreaker:
+                    self.tiebreaker = space.import_review_food_tiebreaker
+            except Exception:
+                pass
 
     def _normalize_food_name(self, name):
         s = name.lower().strip()
@@ -334,6 +359,8 @@ class FoodDeduplicationHelper:
             overlap = tokens1 & tokens2
             if len(overlap) / max(len(tokens1), len(tokens2)) >= 0.8:
                 return True
+        if normalized_levenshtein_ratio(name1, name2) >= self.levenshtein_threshold:
+            return True
         return False
 
     def find_duplicate_foods(self, recipe_data):
@@ -356,7 +383,7 @@ class FoodDeduplicationHelper:
         issues = []
         for group in groups:
             if len(group) > 1:
-                canonical = max(group, key=lambda x: len(self._normalize_food_name(x)))
+                canonical = self._pick_canonical(group)
                 issues.append({
                     'issue_type': 'DUPLICATE_FOOD',
                     'severity': 'MEDIUM',
@@ -364,8 +391,41 @@ class FoodDeduplicationHelper:
                     'field_name': 'ingredients',
                     'original_value': ', '.join(g for g in group if g != canonical),
                     'suggested_value': canonical,
+                    'tiebreaker': self.tiebreaker,
                 })
         return issues
+
+    def _pick_canonical(self, names):
+        if not names:
+            return None
+        if len(names) == 1:
+            return names[0]
+
+        by_len = defaultdict(list)
+        for name in names:
+            by_len[len(self._normalize_food_name(name))].append(name)
+        max_len = max(by_len.keys())
+        candidates = by_len[max_len]
+        if len(candidates) == 1:
+            return candidates[0]
+
+        if self.space:
+            db_foods = {f.name: f for f in Food.objects.filter(space=self.space, name__in=candidates)}
+        else:
+            db_foods = {}
+
+        if self.tiebreaker == 'ID':
+            in_db = [db_foods[n] for n in candidates if n in db_foods]
+            if in_db:
+                return sorted(in_db, key=lambda f: f.id, reverse=True)[0].name
+            return sorted(candidates, key=lambda n: (-len(n), n))[0]
+        elif self.tiebreaker == 'CREATED_AT':
+            in_db = [db_foods[n] for n in candidates if n in db_foods and hasattr(db_foods[n], 'created_at')]
+            if in_db:
+                return sorted(in_db, key=lambda f: f.created_at, reverse=True)[0].name
+            return sorted(candidates, key=lambda n: (-len(n), n))[0]
+        else:
+            return sorted(candidates)[0]
 
     def _cluster_food_names(self, names):
         unique_names = list(dict.fromkeys(names))
@@ -400,7 +460,7 @@ class FoodDeduplicationHelper:
             matches = (
                 Food.objects.filter(space=self.space)
                 .annotate(similarity=TrigramSimilarity('name', normalized))
-                .filter(similarity__gte=self.TRIGRAM_THRESHOLD)
+                .filter(similarity__gte=self.trigram_threshold)
                 .order_by('-similarity')[:limit]
             )
             return [{'id': f.id, 'name': f.name, 'similarity': f.similarity} for f in matches]
@@ -409,7 +469,7 @@ class FoodDeduplicationHelper:
             results = []
             for f in all_foods:
                 score = normalized_levenshtein_ratio(normalized, self._normalize_food_name(f.name))
-                if score >= self.LEVENSHTEIN_THRESHOLD:
+                if score >= self.levenshtein_threshold:
                     results.append({'id': f.id, 'name': f.name, 'similarity': score})
             results.sort(key=lambda x: x['similarity'], reverse=True)
             return results[:limit]
@@ -421,8 +481,23 @@ class ImageSourceHelper:
     MANUAL_UPLOAD_STRATEGY = 'manual_upload'
     API_FETCH_STRATEGY = 'api_fetch'
 
+    DEFAULT_CONCURRENCY = 3
+    DEFAULT_BATCH_RESULT_LIMIT = 100
+    DEFAULT_TIMEOUT = 10
+
     def __init__(self, space=None):
         self.space = space
+        self.concurrency = self.DEFAULT_CONCURRENCY
+        self.batch_result_limit = self.DEFAULT_BATCH_RESULT_LIMIT
+        self.timeout = self.DEFAULT_TIMEOUT
+        if space is not None:
+            try:
+                if space.import_review_image_fetch_concurrency:
+                    self.concurrency = max(1, int(space.import_review_image_fetch_concurrency))
+                if space.import_review_batch_result_limit:
+                    self.batch_result_limit = max(1, int(space.import_review_batch_result_limit))
+            except Exception:
+                pass
 
     def scan_missing_images(self, import_recipes):
         issues = []
@@ -529,6 +604,108 @@ class ImageSourceHelper:
             return {'success': False, 'error': 'No image found on page'}
         except Exception as e:
             return {'success': False, 'error': str(e)}
+
+    def fetch_images_batch(self, import_recipes, page=1, page_size=None):
+        """
+        Batch fetch images for import recipes concurrently.
+        Results are paginated according to the space's batch_result_limit.
+        Returns a dict with counts and detailed results.
+        """
+        import concurrent.futures
+        from collections import Counter
+
+        if page_size is None:
+            page_size = self.batch_result_limit
+
+        def _fetch_one(recipe):
+            if recipe.image_url:
+                return {
+                    'id': recipe.id,
+                    'name': recipe.name,
+                    'status': 'skipped',
+                    'reason': 'already_has_image',
+                }
+            if not recipe.source_url:
+                return {
+                    'id': recipe.id,
+                    'name': recipe.name,
+                    'status': 'failed',
+                    'reason': 'no_source_url',
+                }
+            result = self.fetch_image_from_source_page(recipe.source_url, timeout=self.timeout)
+            if result.get('success'):
+                return {
+                    'id': recipe.id,
+                    'name': recipe.name,
+                    'status': 'fetched',
+                    'image_url': result['image_url'],
+                }
+            return {
+                'id': recipe.id,
+                'name': recipe.name,
+                'status': 'failed',
+                'reason': result.get('error', 'fetch_error'),
+            }
+
+        total = len(import_recipes)
+        worker_count = min(self.concurrency, max(1, total))
+
+        fetched_count = 0
+        failed_count = 0
+        skipped_count = 0
+        all_results = []
+
+        if worker_count > 1 and total > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {executor.submit(_fetch_one, r): r for r in import_recipes}
+                for future in concurrent.futures.as_completed(future_map):
+                    try:
+                        res = future.result()
+                    except Exception as e:
+                        r = future_map[future]
+                        res = {
+                            'id': r.id,
+                            'name': r.name,
+                            'status': 'failed',
+                            'reason': str(e),
+                        }
+                    all_results.append(res)
+                    if res['status'] == 'fetched':
+                        fetched_count += 1
+                    elif res['status'] == 'skipped':
+                        skipped_count += 1
+                    else:
+                        failed_count += 1
+        else:
+            for r in import_recipes:
+                res = _fetch_one(r)
+                all_results.append(res)
+                if res['status'] == 'fetched':
+                    fetched_count += 1
+                elif res['status'] == 'skipped':
+                    skipped_count += 1
+                else:
+                    failed_count += 1
+
+        page = max(1, int(page))
+        start = (page - 1) * page_size
+        end = start + page_size
+        paged_results = all_results[start:end]
+        status_counts = dict(Counter(r['status'] for r in all_results))
+
+        return {
+            'results': paged_results,
+            'total': total,
+            'total_pages': max(1, (total + page_size - 1) // page_size),
+            'page': page,
+            'page_size': page_size,
+            'fetched_count': fetched_count,
+            'failed_count': failed_count,
+            'skipped_count': skipped_count,
+            'status_counts': status_counts,
+            'concurrency': worker_count,
+            'batch_result_limit': self.batch_result_limit,
+        }
 
 
 def scan_import_recipe(import_recipe, space=None):

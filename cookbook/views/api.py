@@ -3628,6 +3628,8 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
     @extend_schema(
         request=inline_serializer(name="ImportRecipeFetchImageSerializer", fields={
             'ids': serializers.ListField(child=IntegerField()),
+            'page': serializers.IntegerField(required=False),
+            'page_size': serializers.IntegerField(required=False),
         }),
         responses=None,
     )
@@ -3635,36 +3637,30 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
     def fetch_images(self, request):
         from cookbook.helper.import_review_helper import ImageSourceHelper
         ids = request.data.get('ids', [])
+        page = request.data.get('page', 1)
+        page_size = request.data.get('page_size', None)
         image_helper = ImageSourceHelper(space=request.space)
-        results = []
-        recipes = self.get_queryset().filter(id__in=ids)
-        for import_recipe in recipes:
-            if import_recipe.image_url:
-                results.append({
-                    'id': import_recipe.id,
-                    'name': import_recipe.name,
-                    'status': 'skipped',
-                    'reason': 'already_has_image',
-                })
-                continue
-            fetched_url = None
-            if import_recipe.source_url:
-                fetch_result = image_helper.fetch_image_from_source_page(import_recipe.source_url)
-                if fetch_result.get('success'):
-                    fetched_url = fetch_result['image_url']
-                    import_recipe.image_url = fetched_url
-                    import_recipe.issues.filter(
+        recipes = list(self.get_queryset().filter(id__in=ids))
+
+        batch_result = image_helper.fetch_images_batch(recipes, page=page, page_size=page_size)
+
+        fetched_ids = []
+        for res in batch_result.get('results', []):
+            if res.get('status') == 'fetched' and res.get('image_url'):
+                try:
+                    recipe = ImportRecipe.objects.get(id=res['id'])
+                    recipe.image_url = res['image_url']
+                    recipe.issues.filter(
                         issue_type=ImportIssue.TYPE_MISSING_IMAGE,
                         resolved=False,
                     ).update(resolved=True)
-                    import_recipe.save()
-            results.append({
-                'id': import_recipe.id,
-                'name': import_recipe.name,
-                'status': 'fetched' if fetched_url else 'failed',
-                'image_url': fetched_url,
-            })
-        return Response({'results': results})
+                    recipe.save()
+                    fetched_ids.append(res['id'])
+                except ImportRecipe.DoesNotExist:
+                    pass
+
+        batch_result['applied_ids'] = fetched_ids
+        return Response(batch_result)
 
     @extend_schema(
         request=inline_serializer(name="ImportRecipeRescanSerializer", fields={

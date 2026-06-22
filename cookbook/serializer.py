@@ -2256,12 +2256,25 @@ class ImportRecipeSerializer(serializers.ModelSerializer):
     unit_recognition = serializers.SerializerMethodField()
     food_suggestions = serializers.SerializerMethodField()
     image_suggestions = serializers.SerializerMethodField()
+    review_config = serializers.SerializerMethodField()
 
     def get_issue_count(self, obj):
         return obj.issues.count()
 
     def get_unresolved_issue_count(self, obj):
         return obj.issues.filter(resolved=False).count()
+
+    def get_review_config(self, obj):
+        space = getattr(obj, 'space', None)
+        if not space:
+            return None
+        return {
+            'fuzzy_threshold': float(space.import_review_fuzzy_threshold) if space.import_review_fuzzy_threshold is not None else 0.7,
+            'trigram_threshold': float(space.import_review_trigram_threshold) if space.import_review_trigram_threshold is not None else 0.6,
+            'image_fetch_concurrency': space.import_review_image_fetch_concurrency or 3,
+            'batch_result_limit': space.import_review_batch_result_limit or 100,
+            'food_tiebreaker': space.import_review_food_tiebreaker or 'LEX',
+        }
 
     def get_unit_recognition(self, obj):
         from cookbook.helper.import_review_helper import UnitRecognitionHelper
@@ -2328,6 +2341,6 @@ class ImportRecipeSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'name', 'import_log', 'source_url', 'recipe_data', 'image_url',
             'status', 'issues', 'issue_count', 'unresolved_issue_count',
-            'unit_recognition', 'food_suggestions', 'image_suggestions',
+            'unit_recognition', 'food_suggestions', 'image_suggestions', 'review_config',
             'created_at', 'updated_at', 'created_by')
         read_only_fields = ('created_by',)
