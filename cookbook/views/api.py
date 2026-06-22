@@ -27,7 +27,7 @@ from django.contrib.postgres.search import TrigramSimilarity
 from django.core.cache import caches
 from django.core.exceptions import FieldError, ValidationError
 from django.core.files import File
-from django.db import DEFAULT_DB_ALIAS
+from django.db import DEFAULT_DB_ALIAS, transaction
 from django.db.models import Case, Count, Exists, OuterRef, ProtectedError, Q, Subquery, Value, When, QuerySet
 from django.db.models import Prefetch
 from django.db.models.fields import BooleanField
@@ -3418,11 +3418,13 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
     permission_classes = [CustomIsUser & CustomTokenHasReadWriteScope]
     pagination_class = DefaultPagination
 
+    RACE_SAFE_LOCK_TIMEOUT_MS = 3000
+
     def get_queryset(self):
         queryset = super().get_queryset().filter(space=self.request.space)
-        status = self.request.query_params.get('status', None)
-        if status:
-            queryset = queryset.filter(status=status)
+        status_param = self.request.query_params.get('status', None)
+        if status_param:
+            queryset = queryset.filter(status=status_param)
         import_log = self.request.query_params.get('import_log', None)
         if import_log:
             queryset = queryset.filter(import_log_id=import_log)
@@ -3431,24 +3433,123 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
             queryset = queryset.filter(issues__issue_type=issue_type).distinct()
         return queryset
 
+    def _get_snapshot_space_config(self):
+        """
+        Takes a row-level lock on the Space row and returns a dict snapshot of
+        the import-review related configuration. This is the authoritative entry
+        point for reading fuzzy thresholds / tiebreakers in any write path so that
+        concurrent admin edits to these values do not cause inconsistent
+        application across a single batch operation.
+        """
+        space = (
+            type(self.request.space)._default_manager
+            .select_for_update(nowait=False)
+            .get(pk=self.request.space.pk)
+        )
+        return {
+            'fuzzy_threshold': float(space.import_review_fuzzy_threshold) if space.import_review_fuzzy_threshold is not None else 0.7,
+            'trigram_threshold': float(space.import_review_trigram_threshold) if space.import_review_trigram_threshold is not None else 0.6,
+            'image_fetch_concurrency': int(space.import_review_image_fetch_concurrency) if space.import_review_image_fetch_concurrency else 3,
+            'batch_result_limit': int(space.import_review_batch_result_limit) if space.import_review_batch_result_limit else 100,
+            'food_tiebreaker': space.import_review_food_tiebreaker or 'LEX',
+        }
+
+    def _get_locked_recipes(self, ids, extra_filters=None):
+        """
+        Locks ImportRecipe rows with consistent ordering (by id asc) to prevent
+        deadlocks between concurrent batch operations. Returns the list of
+        locked objects; rows already held by other transactions are skipped if
+        the database supports skip_locked, otherwise this call will block.
+        """
+        qs = ImportRecipe.objects.filter(space=self.request.space, id__in=ids)
+        if extra_filters:
+            qs = qs.filter(**extra_filters)
+        qs = qs.order_by('id').select_for_update(skip_locked=True)
+        return list(qs)
+
     @extend_schema(
         request=inline_serializer(name="ImportRecipeApproveSerializer", fields={
             'ids': serializers.ListField(child=IntegerField()),
+            'stop_on_failure': serializers.BooleanField(required=False),
         }),
         responses=None,
     )
     @decorators.action(detail=False, methods=['post'], url_path='batch-approve')
     def batch_approve(self, request):
+        """
+        Transaction boundary:
+        * Space config is snapshotted under row-lock before processing.
+        * Each ImportRecipe is locked with select_for_update(skip_locked=True)
+          ordered by id to avoid deadlock.
+        * Each individual recipe conversion runs inside its own savepoint so a
+          single recipe failing validation (e.g. duplicate name, invalid FK)
+          does not roll back the rest of the batch.
+        * Returns a per-item result list describing imported / skipped / failed
+          states plus failure reasons so the caller can handle the hybrid
+          outcome deterministically.
+        """
         ids = request.data.get('ids', [])
-        recipes_to_approve = self.get_queryset().filter(id__in=ids, status=ImportRecipe.STATUS_PENDING)
-        created_recipes = []
-        for import_recipe in recipes_to_approve:
-            recipe = self._convert_to_recipe(import_recipe, request.user)
-            if recipe:
-                created_recipes.append(recipe.id)
-                import_recipe.status = ImportRecipe.STATUS_APPROVED
-                import_recipe.save()
-        return Response({'created_recipes': created_recipes, 'count': len(created_recipes)})
+        stop_on_failure = request.data.get('stop_on_failure', False)
+
+        results = []
+        created_ids = []
+        failed_count = 0
+        skipped_count = 0
+
+        with transaction.atomic():
+            try:
+                _ = self._get_snapshot_space_config()
+            except Exception:
+                pass
+
+            locked_recipes = self._get_locked_recipes(ids, {'status': ImportRecipe.STATUS_PENDING})
+            locked_ids = {r.pk for r in locked_recipes}
+
+            for requested_id in ids:
+                if requested_id not in locked_ids:
+                    results.append({
+                        'id': requested_id,
+                        'status': 'skipped',
+                        'reason': 'row_locked_by_other_transaction_or_already_processed',
+                    })
+                    skipped_count += 1
+                    continue
+
+                import_recipe = next(r for r in locked_recipes if r.pk == requested_id)
+
+                savepoint = transaction.savepoint()
+                try:
+                    recipe = self._convert_to_recipe(import_recipe, request.user)
+                    if not recipe:
+                        raise RuntimeError('recipe conversion returned None (validation or DB error)')
+                    import_recipe.status = ImportRecipe.STATUS_APPROVED
+                    import_recipe.save(update_fields=['status', 'updated_at'])
+                    transaction.savepoint_commit(savepoint)
+                    created_ids.append(recipe.id)
+                    results.append({
+                        'id': import_recipe.pk,
+                        'status': 'imported',
+                        'recipe_id': recipe.id,
+                    })
+                except Exception as e:
+                    transaction.savepoint_rollback(savepoint)
+                    failed_count += 1
+                    results.append({
+                        'id': import_recipe.pk,
+                        'status': 'failed',
+                        'error': str(e),
+                    })
+                    if stop_on_failure:
+                        break
+
+        return Response({
+            'count': len(created_ids),
+            'created_recipes': created_ids,
+            'failed_count': failed_count,
+            'skipped_count': skipped_count,
+            'imported_count': len(created_ids),
+            'results': results,
+        })
 
     @extend_schema(
         request=inline_serializer(name="ImportRecipeRejectSerializer", fields={
@@ -3458,9 +3559,29 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
     )
     @decorators.action(detail=False, methods=['post'], url_path='batch-reject')
     def batch_reject(self, request):
+        """
+        Transaction boundary: single atomic UPDATE of ImportRecipe rows under
+        row-locks to avoid lost updates with a concurrent batch-approve.
+        """
         ids = request.data.get('ids', [])
-        updated = self.get_queryset().filter(id__in=ids).update(status=ImportRecipe.STATUS_REJECTED)
-        return Response({'count': updated})
+        with transaction.atomic():
+            try:
+                _ = self._get_snapshot_space_config()
+            except Exception:
+                pass
+            locked = self._get_locked_recipes(ids)
+            locked_ids = [r.pk for r in locked]
+            updated = (
+                ImportRecipe.objects
+                .filter(pk__in=locked_ids)
+                .update(status=ImportRecipe.STATUS_REJECTED)
+            )
+            skipped = len(ids) - len(locked_ids)
+        return Response({
+            'count': updated,
+            'skipped_count': skipped,
+            'rejected_ids': locked_ids,
+        })
 
     @extend_schema(
         request=inline_serializer(name="ImportRecipeUnitUpdateSerializer", fields={
@@ -3473,55 +3594,103 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
     )
     @decorators.action(detail=False, methods=['post'], url_path='batch-update-unit')
     def batch_update_unit(self, request):
-        from cookbook.helper.import_review_helper import UnitRecognitionHelper
+        """
+        Lock / transaction path:
+        1. Space row locked -> fuzzy/tiebreaker config snapshotted.
+        2. Target Unit row locked to prevent concurrent deletion/rename.
+        3. All selected ImportRecipe rows locked (order by id asc) before edit.
+        4. Whole operation wrapped in a single transaction: on any failure the
+           unit replacement AND the issue-resolution updates are rolled back
+           together (no half-applied batches).
+        """
+        from cookbook.helper.import_review_helper import UnitRecognitionHelper, normalized_levenshtein_ratio
+
         ids = request.data.get('ids', [])
         original_unit = request.data.get('original_unit', '')
         target_unit_id = request.data.get('target_unit_id')
         use_fuzzy = request.data.get('use_fuzzy', True)
-        try:
-            target_unit = Unit.objects.get(id=target_unit_id, space=request.space)
-        except Unit.DoesNotExist:
-            return Response({'error': 'Target unit not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        unit_helper = UnitRecognitionHelper(space=request.space)
-        updated_count = 0
-        resolved_issue_count = 0
-        recipes = self.get_queryset().filter(id__in=ids)
-        for import_recipe in recipes:
-            recipe_data = import_recipe.recipe_data
-            if 'steps' in recipe_data:
-                for step in recipe_data['steps']:
-                    if 'ingredients' in step:
+        with transaction.atomic():
+            config = self._get_snapshot_space_config()
+
+            try:
+                target_unit = (
+                    Unit.objects
+                    .select_for_update()
+                    .get(id=target_unit_id, space=request.space)
+                )
+            except Unit.DoesNotExist:
+                return Response({'error': 'Target unit not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            unit_helper = UnitRecognitionHelper(space=request.space)
+            unit_helper.levenshtein_threshold = config['fuzzy_threshold']
+            unit_helper.trigram_threshold = config['trigram_threshold']
+
+            locked_recipes = self._get_locked_recipes(ids)
+
+            updated_count = 0
+            resolved_issue_count = 0
+            per_recipe = []
+
+            for import_recipe in locked_recipes:
+                recipe_data = import_recipe.recipe_data
+                recipe_updates = 0
+                if 'steps' in recipe_data:
+                    for step in recipe_data['steps']:
+                        if 'ingredients' not in step:
+                            continue
                         for ing in step['ingredients']:
                             unit_info = ing.get('unit')
                             if not unit_info:
                                 continue
-                            unit_name = unit_info.get('name', '') if isinstance(unit_info, dict) else str(unit_info)
+                            unit_name = (
+                                unit_info.get('name', '')
+                                if isinstance(unit_info, dict) else str(unit_info)
+                            )
                             if not unit_name:
                                 continue
+
                             is_match = (unit_name == original_unit)
                             if not is_match and use_fuzzy:
                                 recognition = unit_helper.recognize_unit(unit_name)
                                 if recognition and recognition.get('canonical') == original_unit:
                                     is_match = True
-                                elif recognition and recognition.get('match_method') in ('edit_distance', 'trigram'):
-                                    normalized_orig = original_unit.lower().strip()
-                                    normalized_current = unit_name.lower().strip()
-                                    from cookbook.helper.import_review_helper import normalized_levenshtein_ratio
-                                    if normalized_levenshtein_ratio(normalized_orig, normalized_current) >= unit_helper.LEVENSHTEIN_THRESHOLD:
+                                elif recognition and recognition.get('match_method') in ('edit_distance', 'trigram', 'edit_distance_db'):
+                                    score = normalized_levenshtein_ratio(
+                                        original_unit.lower().strip(),
+                                        unit_name.lower().strip(),
+                                    )
+                                    if score >= unit_helper.levenshtein_threshold:
                                         is_match = True
                             if is_match:
                                 ing['unit'] = {'id': target_unit.id, 'name': target_unit.name}
                                 updated_count += 1
-            import_recipe.recipe_data = recipe_data
-            import_recipe.save()
-            resolved = import_recipe.issues.filter(
-                issue_type=ImportIssue.TYPE_UNIT_ERROR,
-                original_value=original_unit,
-                resolved=False,
-            ).update(resolved=True)
-            resolved_issue_count += resolved
-        return Response({'updated_count': updated_count, 'resolved_issues': resolved_issue_count})
+                                recipe_updates += 1
+
+                if recipe_updates > 0:
+                    import_recipe.recipe_data = recipe_data
+                    import_recipe.save(update_fields=['recipe_data', 'updated_at'])
+                    resolved = import_recipe.issues.filter(
+                        issue_type=ImportIssue.TYPE_UNIT_ERROR,
+                        original_value=original_unit,
+                        resolved=False,
+                    ).update(resolved=True)
+                    resolved_issue_count += resolved
+                    per_recipe.append({
+                        'id': import_recipe.pk,
+                        'updates': recipe_updates,
+                        'issues_resolved': resolved,
+                    })
+
+        return Response({
+            'updated_count': updated_count,
+            'resolved_issues': resolved_issue_count,
+            'processed_recipes': len(locked_recipes),
+            'skipped_count': len(ids) - len(locked_recipes),
+            'per_recipe': per_recipe,
+            'fuzzy_threshold_used': config['fuzzy_threshold'],
+            'trigram_threshold_used': config['trigram_threshold'],
+        })
 
     @extend_schema(
         request=inline_serializer(name="ImportRecipeMergeFoodSerializer", fields={
@@ -3534,32 +3703,70 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
     )
     @decorators.action(detail=False, methods=['post'], url_path='batch-merge-food')
     def batch_merge_food(self, request):
+        """
+        Lock / transaction path:
+        1. Space row locked -> fuzzy/tiebreaker config snapshotted.
+        2. Target Food row locked (both the target row and any originals that
+           already exist in the DB) so a concurrent merge operation does not
+           change the food tree while we are rewriting references.
+        3. ImportRecipe rows locked (order by id asc).
+        4. Single atomic transaction: any failure rolls back the entire
+           replacement + issue resolution.
+        Tiebreaker rule used during fuzzy variant detection is read from the
+        snapshotted Space config (see `food_tiebreaker` in the response).
+        """
         from cookbook.helper.import_review_helper import FoodDeduplicationHelper
+
         ids = request.data.get('ids', [])
         original_food_names = request.data.get('original_food_names', [])
         target_food_id = request.data.get('target_food_id')
         use_fuzzy = request.data.get('use_fuzzy', True)
-        try:
-            target_food = Food.objects.get(id=target_food_id, space=request.space)
-        except Food.DoesNotExist:
-            return Response({'error': 'Target food not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        food_helper = FoodDeduplicationHelper(space=request.space)
-        updated_count = 0
-        resolved_issue_count = 0
-        recipes = self.get_queryset().filter(id__in=ids)
-        for import_recipe in recipes:
-            recipe_data = import_recipe.recipe_data
-            if 'steps' in recipe_data:
-                for step in recipe_data['steps']:
-                    if 'ingredients' in step:
+        with transaction.atomic():
+            config = self._get_snapshot_space_config()
+
+            try:
+                target_food = (
+                    Food.objects
+                    .select_for_update()
+                    .get(id=target_food_id, space=request.space)
+                )
+            except Food.DoesNotExist:
+                return Response({'error': 'Target food not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            list(Food.objects.filter(
+                space=request.space, name__in=original_food_names
+            ).select_for_update())
+
+            food_helper = FoodDeduplicationHelper(space=request.space)
+            food_helper.levenshtein_threshold = config['fuzzy_threshold']
+            food_helper.trigram_threshold = config['trigram_threshold']
+            food_helper.tiebreaker = config['food_tiebreaker']
+
+            locked_recipes = self._get_locked_recipes(ids)
+
+            updated_count = 0
+            resolved_issue_count = 0
+            per_recipe = []
+
+            for import_recipe in locked_recipes:
+                recipe_data = import_recipe.recipe_data
+                recipe_updates = 0
+                if 'steps' in recipe_data:
+                    for step in recipe_data['steps']:
+                        if 'ingredients' not in step:
+                            continue
                         for ing in step['ingredients']:
                             food_info = ing.get('food')
                             if not food_info:
                                 continue
-                            food_name = food_info.get('name', '') if isinstance(food_info, dict) else str(food_info)
+                            food_name = (
+                                food_info.get('name', '')
+                                if isinstance(food_info, dict) else str(food_info)
+                            )
                             if not food_name:
                                 continue
+
                             is_match = food_name in original_food_names
                             if not is_match and use_fuzzy:
                                 for orig_name in original_food_names:
@@ -3569,16 +3776,35 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
                             if is_match:
                                 ing['food'] = {'id': target_food.id, 'name': target_food.name}
                                 updated_count += 1
-            import_recipe.recipe_data = recipe_data
-            import_recipe.save()
-            for orig_name in original_food_names:
-                resolved = import_recipe.issues.filter(
-                    issue_type=ImportIssue.TYPE_DUPLICATE_FOOD,
-                    original_value__contains=orig_name,
-                    resolved=False,
-                ).update(resolved=True)
-                resolved_issue_count += resolved
-        return Response({'updated_count': updated_count, 'resolved_issues': resolved_issue_count})
+                                recipe_updates += 1
+
+                if recipe_updates > 0:
+                    import_recipe.recipe_data = recipe_data
+                    import_recipe.save(update_fields=['recipe_data', 'updated_at'])
+                    recipe_resolved = 0
+                    for orig_name in original_food_names:
+                        resolved = import_recipe.issues.filter(
+                            issue_type=ImportIssue.TYPE_DUPLICATE_FOOD,
+                            original_value__contains=orig_name,
+                            resolved=False,
+                        ).update(resolved=True)
+                        recipe_resolved += resolved
+                    resolved_issue_count += recipe_resolved
+                    per_recipe.append({
+                        'id': import_recipe.pk,
+                        'updates': recipe_updates,
+                        'issues_resolved': recipe_resolved,
+                    })
+
+        return Response({
+            'updated_count': updated_count,
+            'resolved_issues': resolved_issue_count,
+            'processed_recipes': len(locked_recipes),
+            'skipped_count': len(ids) - len(locked_recipes),
+            'per_recipe': per_recipe,
+            'fuzzy_threshold_used': config['fuzzy_threshold'],
+            'tiebreaker_used': config['food_tiebreaker'],
+        })
 
     @extend_schema(
         request=inline_serializer(name="ImportRecipeImageUpdateSerializer", fields={
@@ -3591,39 +3817,97 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
     )
     @decorators.action(detail=False, methods=['post'], url_path='batch-update-image')
     def batch_update_image(self, request):
+        """
+        Lock / transaction path:
+        1. Space row locked -> concurrency/result-limit config snapshotted.
+        2. If an image_file_id is supplied the UserFile row is also locked so a
+           concurrent delete cannot orphan the reference.
+        3. ImportRecipe rows locked (order by id asc).
+        4. Single atomic transaction: failure rolls back image assignments AND
+           issue resolutions together.
+        """
         from cookbook.helper.import_review_helper import ImageSourceHelper
+
         ids = request.data.get('ids', [])
         strategy = request.data.get('strategy', 'manual')
         image_url = request.data.get('image_url')
         image_file_id = request.data.get('image_file_id')
 
-        image_helper = ImageSourceHelper(space=request.space)
-        updated_count = 0
-        resolved_issue_count = 0
-        recipes = self.get_queryset().filter(id__in=ids)
-        for import_recipe in recipes:
-            applied_url = image_url
-            if strategy == 'api_fetch' and not applied_url and import_recipe.source_url:
-                result = image_helper.fetch_image_from_source_page(import_recipe.source_url)
-                if result.get('success'):
-                    applied_url = result['image_url']
-            elif strategy == 'placeholder' and not applied_url:
-                applied_url = '/static/placeholder_recipe.png'
+        with transaction.atomic():
+            config = self._get_snapshot_space_config()
 
-            if applied_url:
-                import_recipe.image_url = applied_url
             if image_file_id:
-                recipe_data = import_recipe.recipe_data
-                recipe_data['image_file_id'] = image_file_id
-                import_recipe.recipe_data = recipe_data
-            import_recipe.save()
-            updated_count += 1
-            resolved = import_recipe.issues.filter(
-                issue_type=ImportIssue.TYPE_MISSING_IMAGE,
-                resolved=False,
-            ).update(resolved=True)
-            resolved_issue_count += resolved
-        return Response({'updated_count': updated_count, 'resolved_issues': resolved_issue_count})
+                try:
+                    from cookbook.models import UserFile
+                    list(UserFile.objects.filter(
+                        pk=image_file_id, space=request.space,
+                    ).select_for_update())
+                except Exception:
+                    pass
+
+            image_helper = ImageSourceHelper(space=request.space)
+            image_helper.concurrency = config['image_fetch_concurrency']
+            image_helper.batch_result_limit = config['batch_result_limit']
+
+            locked_recipes = self._get_locked_recipes(ids)
+
+            updated_count = 0
+            resolved_issue_count = 0
+            per_recipe = []
+
+            for import_recipe in locked_recipes:
+                applied_url = image_url
+                fetch_error = None
+
+                if strategy == 'api_fetch' and not applied_url and import_recipe.source_url:
+                    result = image_helper.fetch_image_from_source_page(import_recipe.source_url)
+                    if result.get('success'):
+                        applied_url = result['image_url']
+                    else:
+                        fetch_error = result.get('error')
+                elif strategy == 'placeholder' and not applied_url:
+                    applied_url = '/static/placeholder_recipe.png'
+
+                updated_this = False
+                if applied_url:
+                    import_recipe.image_url = applied_url
+                    updated_this = True
+                if image_file_id:
+                    recipe_data = import_recipe.recipe_data
+                    recipe_data['image_file_id'] = image_file_id
+                    import_recipe.recipe_data = recipe_data
+                    updated_this = True
+
+                if updated_this:
+                    import_recipe.save(update_fields=['image_url', 'recipe_data', 'updated_at'])
+                    resolved = import_recipe.issues.filter(
+                        issue_type=ImportIssue.TYPE_MISSING_IMAGE,
+                        resolved=False,
+                    ).update(resolved=True)
+                    resolved_issue_count += resolved
+                    updated_count += 1
+                    per_recipe.append({
+                        'id': import_recipe.pk,
+                        'image_url': applied_url,
+                        'issues_resolved': resolved,
+                        'fetch_error': fetch_error,
+                    })
+                else:
+                    per_recipe.append({
+                        'id': import_recipe.pk,
+                        'skipped': True,
+                        'fetch_error': fetch_error,
+                    })
+
+        return Response({
+            'updated_count': updated_count,
+            'resolved_issues': resolved_issue_count,
+            'processed_recipes': len(locked_recipes),
+            'skipped_count': len(ids) - len(locked_recipes),
+            'per_recipe': per_recipe,
+            'strategy': strategy,
+            'concurrency_used': config['image_fetch_concurrency'],
+        })
 
     @extend_schema(
         request=inline_serializer(name="ImportRecipeFetchImageSerializer", fields={
@@ -3635,31 +3919,66 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
     )
     @decorators.action(detail=False, methods=['post'], url_path='fetch-images')
     def fetch_images(self, request):
+        """
+        Lock / transaction path:
+        * Concurrency limit is snapshotted from the locked Space row before
+          spawning fetch threads to prevent inconsistency when an admin changes
+          the setting mid-batch.
+        * HTTP fetches themselves are executed OUTSIDE the transaction (we do
+          not want to hold row locks while waiting on the network). Each
+          fetched result is then applied in its own short savepoint so a single
+          bad network response cannot invalidate the rest of the batch.
+        * Result pagination is enforced by `ImageSourceHelper.batch_result_limit`
+          which is also read from the snapshotted config.
+        """
         from cookbook.helper.import_review_helper import ImageSourceHelper
         ids = request.data.get('ids', [])
         page = request.data.get('page', 1)
         page_size = request.data.get('page_size', None)
-        image_helper = ImageSourceHelper(space=request.space)
-        recipes = list(self.get_queryset().filter(id__in=ids))
 
-        batch_result = image_helper.fetch_images_batch(recipes, page=page, page_size=page_size)
+        with transaction.atomic():
+            config = self._get_snapshot_space_config()
+
+        image_helper = ImageSourceHelper(space=request.space)
+        image_helper.concurrency = config['image_fetch_concurrency']
+        image_helper.batch_result_limit = config['batch_result_limit'] if not page_size else page_size
+        recipes_for_fetch = list(self.get_queryset().filter(id__in=ids))
+
+        batch_result = image_helper.fetch_images_batch(
+            recipes_for_fetch, page=page, page_size=page_size,
+        )
 
         fetched_ids = []
         for res in batch_result.get('results', []):
-            if res.get('status') == 'fetched' and res.get('image_url'):
-                try:
-                    recipe = ImportRecipe.objects.get(id=res['id'])
+            if res.get('status') != 'fetched' or not res.get('image_url'):
+                continue
+            try:
+                with transaction.atomic():
+                    recipe = (
+                        ImportRecipe.objects
+                        .select_for_update()
+                        .get(pk=res['id'], space=request.space)
+                    )
+                    if recipe.image_url:
+                        res['apply_status'] = 'skipped_already_set'
+                        continue
                     recipe.image_url = res['image_url']
                     recipe.issues.filter(
                         issue_type=ImportIssue.TYPE_MISSING_IMAGE,
                         resolved=False,
                     ).update(resolved=True)
-                    recipe.save()
+                    recipe.save(update_fields=['image_url', 'updated_at'])
                     fetched_ids.append(res['id'])
-                except ImportRecipe.DoesNotExist:
-                    pass
+                    res['apply_status'] = 'applied'
+            except Exception as e:
+                res['apply_status'] = 'failed'
+                res['apply_error'] = str(e)
 
         batch_result['applied_ids'] = fetched_ids
+        batch_result['config_snapshot'] = {
+            'image_fetch_concurrency': config['image_fetch_concurrency'],
+            'batch_result_limit': config['batch_result_limit'],
+        }
         return Response(batch_result)
 
     @extend_schema(
@@ -3670,26 +3989,60 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
     )
     @decorators.action(detail=False, methods=['post'], url_path='rescan')
     def rescan(self, request):
+        """
+        Lock / transaction path:
+        * Threshold/tiebreaker values snapshotted from locked Space row before
+          scanning so each recipe is evaluated under the same rule set even if
+          an admin edits configuration while the rescan is in flight.
+        * Each recipe processed in its own savepoint so malformed recipe_data
+          in one row does not cancel detection for the rest.
+        """
         from cookbook.helper.import_review_helper import scan_import_recipe
         ids = request.data.get('ids', [])
-        recipes = self.get_queryset().filter(id__in=ids)
+
         total_issues = 0
-        for import_recipe in recipes:
-            import_recipe.issues.all().delete()
-            issues = scan_import_recipe(import_recipe, space=request.space)
-            for issue_data in issues:
-                ImportIssue.objects.create(
-                    import_recipe=import_recipe,
-                    issue_type=issue_data['issue_type'],
-                    severity=issue_data.get('severity', 'MEDIUM'),
-                    message=issue_data.get('message', ''),
-                    field_name=issue_data.get('field_name'),
-                    original_value=issue_data.get('original_value'),
-                    suggested_value=issue_data.get('suggested_value'),
-                    space=request.space,
-                )
-            total_issues += len(issues)
-        return Response({'scanned_recipes': len(ids), 'total_issues': total_issues})
+        per_recipe = []
+
+        with transaction.atomic():
+            config = self._get_snapshot_space_config()
+            locked_recipes = self._get_locked_recipes(ids)
+
+            for import_recipe in locked_recipes:
+                sp = transaction.savepoint()
+                try:
+                    import_recipe.issues.all().delete()
+                    issues = scan_import_recipe(import_recipe, space=request.space)
+                    for issue_data in issues:
+                        ImportIssue.objects.create(
+                            import_recipe=import_recipe,
+                            issue_type=issue_data['issue_type'],
+                            severity=issue_data.get('severity', 'MEDIUM'),
+                            message=issue_data.get('message', ''),
+                            field_name=issue_data.get('field_name'),
+                            original_value=issue_data.get('original_value'),
+                            suggested_value=issue_data.get('suggested_value'),
+                            space=request.space,
+                        )
+                    total_issues += len(issues)
+                    transaction.savepoint_commit(sp)
+                    per_recipe.append({
+                        'id': import_recipe.pk,
+                        'issues_found': len(issues),
+                    })
+                except Exception as e:
+                    transaction.savepoint_rollback(sp)
+                    per_recipe.append({
+                        'id': import_recipe.pk,
+                        'error': str(e),
+                    })
+
+        return Response({
+            'scanned_recipes': len(locked_recipes),
+            'skipped_count': len(ids) - len(locked_recipes),
+            'total_issues': total_issues,
+            'per_recipe': per_recipe,
+            'config_snapshot': config,
+        })
 
     def _convert_to_recipe(self, import_recipe, user):
         try:
@@ -3705,10 +4058,10 @@ class ImportRecipeViewSet(LoggingMixin, StandardFilterModelViewSet):
             )
             if import_recipe.image_url:
                 recipe.link = import_recipe.image_url
-                recipe.save()
+                recipe.save(update_fields=['link'])
             return recipe
         except Exception as e:
-            return None
+            raise
 
 
 class ImportIssueViewSet(LoggingMixin, viewsets.ModelViewSet):
